@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { AreaChart, Area, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import { VENUES_BASE, PLAYERS_BASE, BOWLERS_BASE, SQUADS, MATCHES } from "./shakti_db.js";
-
+ 
 const C = {
   bg:"#fdf6ee", panel:"#fff8f2", card:"#ffffff", border:"#e8d5c0",
   borderS:"#c9a87c", crimson:"#9b0020", crimsonL:"#c0002a",
