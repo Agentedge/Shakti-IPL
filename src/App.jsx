@@ -522,12 +522,10 @@ export default function Shakti(){
   const chartData=(()=>{let r=INIT_BR;const pts=[{n:0,v:INIT_BR}];bets.filter(b=>b.out!=="PENDING").forEach((b,i)=>{r+=b.out==="WIN"?b.stake:-b.stake;pts.push({n:i+1,v:r});});return pts;})();
   const matchPnL=(()=>{const map={};bets.forEach(b=>{if(!map[b.match])map[b.match]={m:b.match,p:0};if(b.out==="WIN")map[b.match].p+=b.stake;if(b.out==="LOSS")map[b.match].p-=b.stake;});return Object.values(map);})();
   // Remaining batting and bowling strength
-  const remainingBat = match && bTeam ?
-    getRemainingBattingStrength(bTeam, battedPlayers, [striker,nonStrike], playing11[bTeam]||[], PLAYERS_BASE) :
-    {avgMidSR:130, avgDeathSR:155, yetToBat:[], hasFinisher:false};
-  const remainingBowl = match && blTeam ?
-    getRemainingBowlingStrength(blTeam, bowlerSpells, lO, BOWLERS_BASE) :
-    {avgDeathEcon:9.5, remainingBowlers:[]};
+  let remainingBat={avgMidSR:130,avgDeathSR:155,yetToBat:[],hasFinisher:false};
+  let remainingBowl={avgDeathEcon:9.5,remainingBowlers:[]};
+  try{if(match&&bTeam)remainingBat=getRemainingBattingStrength(bTeam,battedPlayers,[striker,nonStrike],playing11[bTeam]||[],PLAYERS_BASE);}catch(e){}
+  try{if(match&&blTeam)remainingBowl=getRemainingBowlingStrength(blTeam,bowlerSpells,lO,BOWLERS_BASE);}catch(e){}
   const todayBets=bets.filter(b=>new Date(b.ts).toDateString()===new Date().toDateString());
   const todayPnL=todayBets.filter(b=>b.out!=="PENDING").reduce((s,b)=>s+(b.out==="WIN"?b.stake:-b.stake),0);
 
@@ -941,7 +939,7 @@ export default function Shakti(){
                       </div>
                       {/* Current batsmen */}
                       {[{name:striker,isStriker:true},{name:nonStrike,isStriker:false}].filter(b=>b.name&&b.name!=="Other Batsman").map(({name,isStriker})=>{
-                        const inn=liveData?.innings?.find(i=>!i.overs||i.overs<20)||liveData?.innings?.[liveData?.innings?.length-1];
+                        const inn=( Array.isArray(liveData?.innings)?liveData.innings:[] ).find(i=>!i.overs||i.overs<20)||( Array.isArray(liveData?.innings)?liveData.innings:[] )[( Array.isArray(liveData?.innings)?liveData.innings:[] ).length-1];
                         const b=inn?.batting?.find(bt=>bt.name?.includes(name.split(" ").slice(-1)[0])||name.includes(bt.name?.split(" ").slice(-1)[0]||"x"));
                         return(
                           <div key={name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3,padding:"5px 6px",background:isStriker?C.crimson+"08":C.bg,borderRadius:6,border:isStriker?"1px solid "+C.crimson+"20":"none"}}>
@@ -960,7 +958,7 @@ export default function Shakti(){
                       })}
                       {/* Already dismissed */}
                       {(()=>{
-                        const inn=liveData?.innings?.find(i=>!i.overs||i.overs<20)||liveData?.innings?.[liveData?.innings?.length-1];
+                        const inn=( Array.isArray(liveData?.innings)?liveData.innings:[] ).find(i=>!i.overs||i.overs<20)||( Array.isArray(liveData?.innings)?liveData.innings:[] )[( Array.isArray(liveData?.innings)?liveData.innings:[] ).length-1];
                         const out=(inn?.batting||[]).filter(b=>b.out&&b.balls>0).slice(-3);
                         return out.map(b=>(
                           <div key={b.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2,padding:"3px 6px",opacity:0.5}}>
@@ -972,6 +970,7 @@ export default function Shakti(){
                             </div>
                           </div>
                         ));
+                        }catch(e){return null;}
                       })()}
                     </div>
                     {/* Bowling scorecard */}
