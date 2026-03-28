@@ -981,7 +981,6 @@ export default function Shakti(){
                         ));
                       })()}
                     </div>
-                    {/* Bowling scorecard */}                    </div>
                     {/* Bowling scorecard */}
                     <div style={{padding:"8px 12px"}}>
                       <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
