@@ -922,7 +922,7 @@ export default function Shakti(){
                     <div style={{marginTop:10,padding:10,background:C.bg,borderRadius:8}}>
                       <div style={{fontSize:8,color:C.dim,marginBottom:2}}>TEAM PP ECON AVG</div>
                       <div style={{fontSize:18,fontWeight:"bold",color:C.crimson}}>{getTeamPPEconFull(blTeam||match.t2).toFixed(2)}</div>
-                      <div style={{fontSize:8,color:getTeamPPEconFull(blTeam||match.t2)<=7.5?C.red:getTeamPPEconFull(blTeam||match.t2)<=8.5?C.gold:C.greenL}}>{getTeamPPEconFull(blTeam||match.t2)<=7.5?"TIGHT ATTACK — expect low PP":"AVERAGE ATTACK":"LEAKY — runs available in PP"}</div>
+                      <div style={{fontSize:8,color:getTeamPPEconFull(blTeam||match.t2)<=7.5?C.red:getTeamPPEconFull(blTeam||match.t2)<=8.5?C.gold:C.greenL}}>{getTeamPPEconFull(blTeam||match.t2)<=7.5?"TIGHT ATTACK — expect low PP":getTeamPPEconFull(blTeam||match.t2)<=8.5?"AVERAGE ATTACK":"LEAKY — runs available in PP"}</div>
                     </div>
                   )}
                 </div>
