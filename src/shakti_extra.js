@@ -1,0 +1,75 @@
+// SHAKTI Extra Data — H2H, Toss Intelligence, PP Bowling Specialists
+// Auto-generated from IPL historical records
+
+export const H2H = {
+  "CSK-MI":   {total:34,t1wins:19,last5:[1,1,0,1,0],venueEdge:{"Wankhede, Mumbai":{t1:3,t2:8}}},
+  "MI-CSK":   {total:34,t1wins:15,last5:[0,0,1,0,1],venueEdge:{"Wankhede, Mumbai":{t1:8,t2:3}}},
+  "RCB-CSK":  {total:32,t1wins:14,last5:[0,1,0,1,0],venueEdge:{"Chinnaswamy, Bangalore":{t1:9,t2:6}}},
+  "CSK-RCB":  {total:32,t1wins:18,last5:[1,0,1,0,1],venueEdge:{}},
+  "KKR-MI":   {total:30,t1wins:16,last5:[1,0,1,1,0],venueEdge:{"Eden Gardens, Kolkata":{t1:10,t2:5}}},
+  "MI-KKR":   {total:30,t1wins:14,last5:[0,1,0,0,1],venueEdge:{}},
+  "RCB-MI":   {total:33,t1wins:13,last5:[0,0,1,0,1],venueEdge:{}},
+  "MI-RCB":   {total:33,t1wins:20,last5:[1,1,0,1,0],venueEdge:{}},
+  "SRH-RCB":  {total:20,t1wins:12,last5:[1,0,1,1,0],venueEdge:{"RGISC, Hyderabad":{t1:7,t2:3}}},
+  "RCB-SRH":  {total:20,t1wins:8, last5:[0,1,0,0,1],venueEdge:{}},
+  "RR-CSK":   {total:28,t1wins:14,last5:[1,0,1,0,0],venueEdge:{}},
+  "CSK-RR":   {total:28,t1wins:14,last5:[0,1,0,1,1],venueEdge:{"Chidambaram, Chennai":{t1:8,t2:3}}},
+  "DC-MI":    {total:27,t1wins:10,last5:[0,0,1,0,0],venueEdge:{}},
+  "MI-DC":    {total:27,t1wins:17,last5:[1,1,0,1,1],venueEdge:{}},
+  "KKR-SRH":  {total:22,t1wins:13,last5:[1,1,0,1,0],venueEdge:{"Eden Gardens, Kolkata":{t1:8,t2:3}}},
+  "SRH-KKR":  {total:22,t1wins:9, last5:[0,0,1,0,1],venueEdge:{}},
+  "GT-MI":    {total:8, t1wins:4, last5:[1,0,1,0,1],venueEdge:{}},
+  "MI-GT":    {total:8, t1wins:4, last5:[0,1,0,1,0],venueEdge:{}},
+  "PBKS-SRH": {total:20,t1wins:9, last5:[0,1,0,0,1],venueEdge:{}},
+  "SRH-PBKS": {total:20,t1wins:11,last5:[1,0,1,1,0],venueEdge:{}},
+  "LSG-DC":   {total:8, t1wins:4, last5:[1,0,1,0,0],venueEdge:{}},
+  "DC-LSG":   {total:8, t1wins:4, last5:[0,1,0,1,1],venueEdge:{}},
+  "GT-RR":    {total:8, t1wins:4, last5:[0,1,0,1,0],venueEdge:{}},
+  "RR-GT":    {total:8, t1wins:4, last5:[1,0,1,0,1],venueEdge:{}},
+  "KKR-LSG":  {total:8, t1wins:5, last5:[1,1,0,1,0],venueEdge:{}},
+  "LSG-KKR":  {total:8, t1wins:3, last5:[0,0,1,0,1],venueEdge:{}},
+};
+
+export const TOSS_INTEL = {
+  "Wankhede, Mumbai":          {bat:39,field:61,note:"Heavy dew. Field first strongly preferred."},
+  "Chidambaram, Chennai":      {bat:56,field:44,note:"Slow pitch, minimal dew. Bat first preferred."},
+  "Chinnaswamy, Bangalore":    {bat:47,field:53,note:"High-scoring. Slight field first edge due to dew."},
+  "Eden Gardens, Kolkata":     {bat:43,field:57,note:"Evening dew significant. Field first advantage."},
+  "RGISC, Hyderabad":          {bat:40,field:60,note:"Heavy dew. Field first strongly preferred."},
+  "Narendra Modi, Ahmedabad":  {bat:51,field:49,note:"Neutral. Toss edge minimal."},
+  "SMS Stadium, Jaipur":       {bat:38,field:62,note:"Dew favors chasing heavily. Field first."},
+  "PCA Stadium, Mohali":       {bat:52,field:48,note:"Good batting surface. Slight bat first edge."},
+  "Arun Jaitley, Delhi":       {bat:50,field:50,note:"Neutral venue. Toss impact minimal."},
+  "DY Patil, Mumbai":          {bat:42,field:58,note:"Dew present. Field first preferred."},
+  "Barsapara, Guwahati":       {bat:65,field:35,note:"Unique — bat first dominates here."},
+  "MYSI, Mullanpur":           {bat:55,field:45,note:"Day matches typical. Slight bat first edge."},
+  "Ekana, Lucknow":            {bat:38,field:62,note:"Field first strongly preferred."},
+  "HPCA, Dharamsala":          {bat:58,field:42,note:"Minimal dew. Bat first preferred."},
+  "SVNS, Raipur":              {bat:33,field:67,note:"Chasing venue. Field first very strongly."},
+};
+
+export const PP_BOWLERS = {
+  CSK:  [{n:"Matheesha Pathirana",e:8.8},{n:"Deepak Chahar",e:8.24},{n:"Sam Curran",e:8.95}],
+  MI:   [{n:"Jasprit Bumrah",e:6.42},{n:"Trent Boult",e:7.51},{n:"Hardik Pandya",e:8.6}],
+  RCB:  [{n:"Josh Hazlewood",e:6.7},{n:"Mohammed Siraj",e:8.03},{n:"Krunal Pandya",e:8.56}],
+  KKR:  [{n:"Mitchell Starc",e:9.76},{n:"Anrich Nortje",e:8.69},{n:"Spencer Johnson",e:8.35}],
+  SRH:  [{n:"Pat Cummins",e:8.96},{n:"Bhuvneshwar Kumar",e:7.17},{n:"T Natarajan",e:8.6}],
+  RR:   [{n:"Trent Boult",e:7.51},{n:"Prasidh Krishna",e:8.38},{n:"Sandeep Sharma",e:8.8}],
+  DC:   [{n:"Anrich Nortje",e:8.69},{n:"Khaleel Ahmed",e:8.8},{n:"Mohsin Khan",e:8.08}],
+  PBKS: [{n:"Arshdeep Singh",e:8.43},{n:"Kagiso Rabada",e:7.81},{n:"Sam Curran",e:8.95}],
+  GT:   [{n:"Mohammed Shami",e:8.3},{n:"Spencer Johnson",e:8.35},{n:"Noor Ahmad",e:8.23}],
+  LSG:  [{n:"Avesh Khan",e:9.23},{n:"Mohsin Khan",e:8.08},{n:"Mark Wood",e:8.94}],
+};
+
+export const IMPACT_PLAYERS = {
+  CSK:  [{n:"Shivam Dube",role:"bat",ppSR:136,deathSR:200,runsAdded:18},{n:"Ravindra Jadeja",role:"allround",ppSR:95,bowlEcon:8.29,runsAdded:8}],
+  MI:   [{n:"Tim David",role:"bat",ppSR:130,deathSR:188,runsAdded:22},{n:"Will Jacks",role:"allround",ppSR:171,bowlEcon:7.79,runsAdded:15}],
+  RCB:  [{n:"Liam Livingstone",role:"bat",ppSR:140,deathSR:203,runsAdded:20},{n:"Will Jacks",role:"allround",ppSR:171,bowlEcon:7.79,runsAdded:15}],
+  KKR:  [{n:"Andre Russell",role:"bat",ppSR:115,deathSR:196,runsAdded:25},{n:"Rinku Singh",role:"bat",ppSR:137,deathSR:190,runsAdded:18}],
+  SRH:  [{n:"Heinrich Klaasen",role:"bat",ppSR:141,deathSR:195,runsAdded:22},{n:"Nitish Kumar Reddy",role:"allround",ppSR:130,runsAdded:12}],
+  RR:   [{n:"Shimron Hetmyer",role:"bat",ppSR:172,deathSR:187,runsAdded:20},{n:"Riyan Parag",role:"bat",ppSR:158,runsAdded:14}],
+  DC:   [{n:"Axar Patel",role:"allround",ppSR:110,bowlEcon:8.4,runsAdded:10},{n:"Tristan Stubbs",role:"bat",ppSR:125,deathSR:150,runsAdded:12}],
+  PBKS: [{n:"Jonny Bairstow",role:"bat",ppSR:169,runsAdded:20},{n:"Marcus Stoinis",role:"allround",ppSR:127,deathSR:213,runsAdded:15}],
+  GT:   [{n:"David Miller",role:"bat",ppSR:107,deathSR:172,runsAdded:20},{n:"Rahul Tewatia",role:"bat",ppSR:110,deathSR:195,runsAdded:15}],
+  LSG:  [{n:"Nicholas Pooran",role:"bat",ppSR:169,deathSR:188,runsAdded:22},{n:"Aiden Markram",role:"bat",ppSR:154,runsAdded:14}],
+};
