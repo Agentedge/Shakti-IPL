@@ -970,7 +970,6 @@ export default function Shakti(){
                             </div>
                           </div>
                         ));
-                        }catch(e){return null;}
                       })()}
                     </div>
                     {/* Bowling scorecard */}
