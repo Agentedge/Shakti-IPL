@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from "recharts";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import { VENUES_BASE, PLAYERS_BASE, BOWLERS_BASE, SQUADS, MATCHES } from "./shakti_db.js";
 import { H2H, TOSS_INTEL, PP_BOWLERS, IMPACT_PLAYERS } from "./shakti_extra.js";
 import { syncLastMatch, applyFormToPlayer, applyFormToBowler } from "./cricket_sync.js";
@@ -498,11 +498,21 @@ export default function Shakti(){
   const bTeam=battingFirst||(match?(toss==="batting"?match.t1:match.t2):"");
   const blTeam=bTeam&&match?(bTeam===match.t1?match.t2:match.t1):"";
   // Apply form multipliers to current players
-  const strikerData = applyFormToPlayer(striker, PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"], playerForm, biasLog, match?.venue);
-  const nonStrikerData = applyFormToPlayer(nonStrike, PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"], playerForm, biasLog, match?.venue);
-  const bowlerData = applyFormToBowler(bowler, BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"], bowlerForm);
-  const pred=match?predict({venueName:match.venue,battingTeam:bTeam,bowlingTeam:blTeam,striker,nonStriker:nonStrike,bowler,pitchType:pitch,weather:wx,toss,lS:is2nd?0:lS,lW:is2nd?0:lW,lO:is2nd?0:lO,v2026,is2nd,target,impactPlayerAdded:impactPlayer,strikerData,nonStrikerData,bowlerData,biasLog,remainingBat,remainingBowl}):null;
-  const winProb=match?(liveData?.isLive?calcLiveWinProb(lS,lW,lO,is2nd?target:liveData?.target||0,match.venue,bTeam,blTeam,is2nd):calcPreMatchWinProb(match.t1,match.t2,match.venue,toss)):50;
+  let strikerData=PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"];
+  let nonStrikerData=PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"];
+  let bowlerData=BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"];
+  try{strikerData=applyFormToPlayer(striker,PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"],playerForm,biasLog,match?.venue);}catch(e){}
+  try{nonStrikerData=applyFormToPlayer(nonStrike,PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"],playerForm,biasLog,match?.venue);}catch(e){}
+  try{bowlerData=applyFormToBowler(bowler,BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"],bowlerForm);}catch(e){}
+  // Remaining batting and bowling strength
+  let remainingBat={avgMidSR:130,avgDeathSR:155,yetToBat:[],hasFinisher:false};
+  let remainingBowl={avgDeathEcon:9.5,remainingBowlers:[]};
+  try{if(match&&bTeam)remainingBat=getRemainingBattingStrength(bTeam,battedPlayers,[striker,nonStrike],playing11[bTeam]||[],PLAYERS_BASE);}catch(e){}
+  try{if(match&&blTeam)remainingBowl=getRemainingBowlingStrength(blTeam,bowlerSpells,lO,BOWLERS_BASE);}catch(e){}
+  let pred=null;
+  try{if(match)pred=predict({venueName:match.venue,battingTeam:bTeam,bowlingTeam:blTeam,striker,nonStriker:nonStrike,bowler,pitchType:pitch,weather:wx,toss,lS:is2nd?0:lS,lW:is2nd?0:lW,lO:is2nd?0:lO,v2026,is2nd,target,impactPlayerAdded:impactPlayer,strikerData,nonStrikerData,bowlerData,biasLog,remainingBat,remainingBowl});}catch(e){pred=null;}
+  let winProb=50;
+  try{if(match)winProb=liveData?.isLive?calcLiveWinProb(lS,lW,lO,is2nd?target:liveData?.target||0,match.venue,bTeam,blTeam,is2nd):calcPreMatchWinProb(match.t1,match.t2,match.venue,toss);}catch(e){winProb=50;}
 
   // Active match bets for correlation
   const activeBetMarkets=match?bets.filter(b=>b.match===match.t1+" vs "+match.t2&&b.out==="PENDING").map(b=>b.marketId):[];
@@ -515,17 +525,11 @@ export default function Shakti(){
   const ogEV=calcEV(ogReal,ogImplied,ogStake);
 
   // Dynamic stake
-  const edgeSize=Math.abs(ogGap);
   const raw=rawStake(br,stage,base,ks)*(recovery?.stakeAdj||1);
   const nextMS=MILESTONES.find(m=>m>br)||TARGET;
   const proj=seasonProjection(br,wr,bets,stage);
   const chartData=(()=>{let r=INIT_BR;const pts=[{n:0,v:INIT_BR}];bets.filter(b=>b.out!=="PENDING").forEach((b,i)=>{r+=b.out==="WIN"?b.stake:-b.stake;pts.push({n:i+1,v:r});});return pts;})();
   const matchPnL=(()=>{const map={};bets.forEach(b=>{if(!map[b.match])map[b.match]={m:b.match,p:0};if(b.out==="WIN")map[b.match].p+=b.stake;if(b.out==="LOSS")map[b.match].p-=b.stake;});return Object.values(map);})();
-  // Remaining batting and bowling strength
-  let remainingBat={avgMidSR:130,avgDeathSR:155,yetToBat:[],hasFinisher:false};
-  let remainingBowl={avgDeathEcon:9.5,remainingBowlers:[]};
-  try{if(match&&bTeam)remainingBat=getRemainingBattingStrength(bTeam,battedPlayers,[striker,nonStrike],playing11[bTeam]||[],PLAYERS_BASE);}catch(e){}
-  try{if(match&&blTeam)remainingBowl=getRemainingBowlingStrength(blTeam,bowlerSpells,lO,BOWLERS_BASE);}catch(e){}
   const todayBets=bets.filter(b=>new Date(b.ts).toDateString()===new Date().toDateString());
   const todayPnL=todayBets.filter(b=>b.out!=="PENDING").reduce((s,b)=>s+(b.out==="WIN"?b.stake:-b.stake),0);
 
@@ -861,7 +865,9 @@ export default function Shakti(){
 
         {/* ══ MATCH ═══════════════════════════════════════════ */}
         {tab==="match"&&match&&(()=>{
-          const intel=realIntelScore(match,toss,v2026);
+          let intel;
+          try{intel=realIntelScore(match,toss,v2026);}
+          catch(e){intel={score:50,verdict:"WATCH",col:C.gold,details:[]};}
           return(
           <div>
             <div style={{...card({marginBottom:10,padding:0,overflow:"hidden"})}}>
@@ -938,9 +944,11 @@ export default function Shakti(){
                         </div>
                       </div>
                       {/* Current batsmen */}
-                      {[{name:striker,isStriker:true},{name:nonStrike,isStriker:false}].filter(b=>b.name&&b.name!=="Other Batsman").map(({name,isStriker})=>{
-                        const inn=( Array.isArray(liveData?.innings)?liveData.innings:[] ).find(i=>!i.overs||i.overs<20)||( Array.isArray(liveData?.innings)?liveData.innings:[] )[( Array.isArray(liveData?.innings)?liveData.innings:[] ).length-1];
-                        const b=inn?.batting?.find(bt=>bt.name?.includes(name.split(" ").slice(-1)[0])||name.includes(bt.name?.split(" ").slice(-1)[0]||"x"));
+                      {[{name:striker,isStriker:true},{name:nonStrike,isStriker:false}].filter(x=>x.name&&x.name!=="Other Batsman").map(({name,isStriker})=>{
+                        const safeInns=Array.isArray(liveData?.innings)?liveData.innings:[];
+                        const curInn=safeInns.find(i=>parseFloat(i.overs||0)>0&&parseFloat(i.overs||0)<20)||safeInns[safeInns.length-1]||null;
+                        const last=(name||"").split(" ").pop()||"";
+                        const b=(curInn?.batting||[]).find(bt=>(bt.name||"").includes(last));
                         return(
                           <div key={name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3,padding:"5px 6px",background:isStriker?C.crimson+"08":C.bg,borderRadius:6,border:isStriker?"1px solid "+C.crimson+"20":"none"}}>
                             <div style={{display:"flex",alignItems:"center",gap:5,flex:1}}>
@@ -951,27 +959,29 @@ export default function Shakti(){
                             <div style={{display:"flex",width:96,justifyContent:"space-between"}}>
                               <span style={{fontSize:11,fontWeight:"bold",color:isStriker?C.crimson:C.text,width:32,textAlign:"right"}}>{b?.runs??"-"}</span>
                               <span style={{fontSize:10,color:C.muted,width:32,textAlign:"right"}}>{b?.balls??"-"}</span>
-                              <span style={{fontSize:10,color:b?.sr>150?C.greenL:b?.sr>100?C.gold:b?.sr>0?C.red:C.muted,fontWeight:"bold",width:32,textAlign:"right"}}>{b?.sr??"-"}</span>
+                              <span style={{fontSize:10,color:(b?.sr||0)>150?C.greenL:(b?.sr||0)>100?C.gold:(b?.sr||0)>0?C.red:C.muted,fontWeight:"bold",width:32,textAlign:"right"}}>{b?.sr??"-"}</span>
                             </div>
                           </div>
                         );
                       })}
                       {/* Already dismissed */}
                       {(()=>{
-                        const inn=( Array.isArray(liveData?.innings)?liveData.innings:[] ).find(i=>!i.overs||i.overs<20)||( Array.isArray(liveData?.innings)?liveData.innings:[] )[( Array.isArray(liveData?.innings)?liveData.innings:[] ).length-1];
-                        const out=(inn?.batting||[]).filter(b=>b.out&&b.balls>0).slice(-3);
+                        const safeInns=Array.isArray(liveData?.innings)?liveData.innings:[];
+                        const curInn=safeInns.find(i=>parseFloat(i.overs||0)>0&&parseFloat(i.overs||0)<20)||safeInns[safeInns.length-1]||null;
+                        const out=(curInn?.batting||[]).filter(b=>b&&b.out&&(b.balls||0)>0).slice(-3);
                         return out.map(b=>(
-                          <div key={b.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2,padding:"3px 6px",opacity:0.5}}>
-                            <span style={{fontSize:9,color:C.muted,flex:1}}>{b.name?.split(" ").slice(-1)[0]}</span>
+                          <div key={b.name||Math.random()} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2,padding:"3px 6px",opacity:0.5}}>
+                            <span style={{fontSize:9,color:C.muted,flex:1}}>{(b.name||"").split(" ").pop()}</span>
                             <div style={{display:"flex",width:96,justifyContent:"space-between"}}>
-                              <span style={{fontSize:9,color:C.muted,width:32,textAlign:"right"}}>{b.runs}</span>
-                              <span style={{fontSize:9,color:C.muted,width:32,textAlign:"right"}}>{b.balls}</span>
-                              <span style={{fontSize:9,color:C.muted,width:32,textAlign:"right"}}>{b.sr}</span>
+                              <span style={{fontSize:9,color:C.muted,width:32,textAlign:"right"}}>{b.runs||0}</span>
+                              <span style={{fontSize:9,color:C.muted,width:32,textAlign:"right"}}>{b.balls||0}</span>
+                              <span style={{fontSize:9,color:C.muted,width:32,textAlign:"right"}}>{b.sr||0}</span>
                             </div>
                           </div>
                         ));
                       })()}
                     </div>
+                    {/* Bowling scorecard */}                    </div>
                     {/* Bowling scorecard */}
                     <div style={{padding:"8px 12px"}}>
                       <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
@@ -1255,8 +1265,9 @@ export default function Shakti(){
 
         {/* ══ INTEL TAB ════════════════════════════════════════ */}
         {tab==="intel"&&match&&(()=>{
-          const intel=realIntelScore(match,toss,v2026);
-          const h=getH2H(match.t1,match.t2);
+          let intel,h;
+          try{intel=realIntelScore(match,toss,v2026);}catch(e){intel={score:50,verdict:"WATCH",col:C.gold,details:[]};}
+          try{h=getH2H(match.t1,match.t2);}catch(e){h={total:10,t1wins:5,last5:[1,0,1,0,1],venueEdge:{}};}
           const ti=TOSS_INTEL[match.venue]||{bat:50,field:50,note:"No data"};
           return(
           <div>
