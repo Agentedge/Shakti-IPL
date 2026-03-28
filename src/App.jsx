@@ -561,11 +561,7 @@ export default function Shakti(){
         }
       }
       // Fallback to Claude web search
-      if(!d){
-        const{fetchLive}=await import("./fetchLive.js").catch(()=>({fetchLive:null}));
-        if(fetchLive) d=await fetchLive(match.t1,match.t2);
-        else d=await fetchLiveClaude(match.t1,match.t2);
-      }
+      if(!d) d=await fetchLiveClaude(match.t1,match.t2);
       if(d){
         setLiveData(d);
         const now=new Date();setLastUpd(now.getHours()+":"+String(now.getMinutes()).padStart(2,"0")+(usedCricData?" CricData":" Web"));
