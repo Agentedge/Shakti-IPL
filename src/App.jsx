@@ -268,27 +268,29 @@ function verdict(val,line){
 }
 
 // ── Live fetch ─────────────────────────────────────────────────
-async function fetchLiveClaude(t1,t2){
-  try{
-    const r=await fetch("/api/proxy",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({
-        model:"claude-sonnet-4-20250514",
-        max_tokens:500,
-        tools:[{type:"web_search_20250305",name:"web_search"}],
-        system:'Return ONLY valid JSON, no other text, no markdown: {"isLive":true,"battingTeam":"RCB","score":45,"wickets":1,"overs":3.4,"runRate":9.8,"lastOver":8,"recentBalls":"1 4 0 6 W 2","striker":"Virat Kohli","nonStriker":"Phil Salt","bowler":"Pat Cummins","target":null,"status":"RCB 45/1 in 3.4 overs"}',
-        messages:[{role:"user",content:"Live IPL score "+t1+" vs "+t2+" right now. Return JSON only, nothing else."}]
-      })
-    });
-    const d=await r.json();
-    if(d.error)throw new Error(d.error.message||JSON.stringify(d.error));
-    const text=d.content.filter(b=>b.type==="text").map(b=>b.text).join("").replace(/```json|```/g,"").trim();
-    return JSON.parse(text);
-  }catch(e){
-    console.error("fetchLiveClaude:",e.message);
-    return null;
-  }
+async function fetchLiveClaude(t1,t2,onStatus){
+  onStatus&&onStatus("Searching for live score...");
+  const r=await fetch("/api/proxy",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      model:"claude-sonnet-4-20250514",
+      max_tokens:600,
+      tools:[{type:"web_search_20250305",name:"web_search"}],
+      system:'You are a cricket score bot. Search for the live score and return ONLY a JSON object with these exact fields. No markdown, no explanation, just the raw JSON object: {"isLive":true,"battingTeam":"TEAM_CODE","score":0,"wickets":0,"overs":0.0,"runRate":0.0,"lastOver":0,"recentBalls":"0 0 0 0 0 0","striker":"Player Name","nonStriker":"Player Name","bowler":"Player Name","target":null,"status":"description"}',
+      messages:[{role:"user",content:"Search for live IPL 2026 cricket score: "+t1+" vs "+t2+" playing today. What is the current score? Return only JSON."}]
+    })
+  });
+  const d=await r.json();
+  if(d.error)throw new Error("API: "+(d.error.message||JSON.stringify(d.error)));
+  onStatus&&onStatus("Processing response...");
+  const blocks=d.content||[];
+  const textBlocks=blocks.filter(b=>b.type==="text");
+  const rawText=textBlocks.map(b=>b.text).join("").trim();
+  // Try to extract JSON from the response
+  const jsonMatch=rawText.match(/\{[\s\S]*\}/);
+  if(!jsonMatch)throw new Error("No JSON in response. Got: "+rawText.slice(0,100));
+  return JSON.parse(jsonMatch[0]);
 }
 async function claudeAsk(msg,ctx){
   try{
@@ -454,6 +456,8 @@ export default function Shakti(){
   const [lineAlerts,setLineAlerts]=useState([]);
   const [liveData,setLiveData]=useState(null);
   const [fetching,setFetching]=useState(false);
+  const [fetchError,setFetchError]=useState(null);
+  const [fetchStatus,setFetchStatus]=useState("");
   const [lastUpd,setLastUpd]=useState(null);
   const [showWkt,setShowWkt]=useState(false);
   const [prevWkts,setPrevWkts]=useState(0);
@@ -554,39 +558,19 @@ export default function Shakti(){
   const todayPnL=todayBets.filter(b=>b.out!=="PENDING").reduce((s,b)=>s+(b.out==="WIN"?b.stake:-b.stake),0);
 
   const doFetch=useCallback(async()=>{
-    if(!match)return;setFetching(true);
+    if(!match)return;
+    setFetching(true);
+    setFetchError(null);
+    setFetchStatus("Connecting...");
     try{
-      // Try CricketData first if we have a matchId
       let d=null;
-      let usedCricData=false;
-      if(matchId){
-        const scorecard=await fetchLiveScorecard(matchId);
-        if(scorecard?.matchStarted){
-          d={
-            isLive:!scorecard.matchEnded,
-            battingTeam:scorecard.battingTeam,
-            score:scorecard.score,
-            wickets:scorecard.wickets,
-            overs:scorecard.overs,
-            runRate:scorecard.runRate,
-            striker:scorecard.striker,
-            nonStriker:scorecard.nonStriker,
-            bowler:scorecard.bowler,
-            target:scorecard.target,
-            status:scorecard.matchEnded?"Match ended":"Live",
-            recentBalls:"",
-          };
-          // Update batting/bowling tracking
-          if(scorecard.battedPlayers?.length) setBattedPlayers(scorecard.battedPlayers);
-          if(scorecard.bowlerSpells?.length) setBowlerSpells(scorecard.bowlerSpells);
-          usedCricData=true;
-        }
-      }
-      // Fallback to Claude web search
-      if(!d) d=await fetchLiveClaude(match.t1,match.t2);
+      // Try Claude web search
+      d=await fetchLiveClaude(match.t1,match.t2,(s)=>setFetchStatus(s));
       if(d){
-        setLiveData(d);
-        const now=new Date();setLastUpd(now.getHours()+":"+String(now.getMinutes()).padStart(2,"0")+(usedCricData?" CricData":" Web"));
+        setLiveData({...d,innings:d.innings||[]});
+        const now=new Date();
+        setLastUpd(now.getHours()+":"+String(now.getMinutes()).padStart(2,"0"));
+        setFetchStatus("Updated at "+now.getHours()+":"+String(now.getMinutes()).padStart(2,"0"));
         if(d.isLive){
           if(PLAYERS_BASE[d.striker])setStriker(d.striker);
           if(PLAYERS_BASE[d.nonStriker])setNonStrike(d.nonStriker);
@@ -595,10 +579,17 @@ export default function Shakti(){
           setPrevWkts(d.wickets||0);
           if(d.target&&d.target>0){setIs2nd(true);setTarget(d.target);}
         }
+      } else {
+        setFetchError("No data returned — match may not have started yet");
+        setFetchStatus("");
       }
-    }catch(e){console.error("doFetch error:",e);}
+    }catch(e){
+      console.error("doFetch:",e);
+      setFetchError(e.message||"Unknown error");
+      setFetchStatus("");
+    }
     setFetching(false);
-  },[match,matchId,prevWkts]);
+  },[match,prevWkts]);
 
   useEffect(()=>{
     if(tab==="match"&&match){setLiveData(null);setPrevWkts(0);doFetch();timerRef.current=setInterval(doFetch,60000);}
@@ -1057,9 +1048,16 @@ export default function Shakti(){
                 </button>}
                 {tossData?.error&&<div style={{fontSize:9,color:C.red,marginBottom:8,padding:"6px 10px",background:"#fff1f0",borderRadius:6}}>{tossData.error}</div>}
                 {tossData&&!tossData.error&&<div style={{fontSize:9,color:C.greenL,marginBottom:8,padding:"6px 10px",background:"#f0fdf4",borderRadius:6,border:"1px solid "+C.greenL}}>✅ {tossData.tossWinner?.split(" ").slice(-2).join(" ")} won toss → {tossData.tossChoice==="bat"?"batting":"fielding"} first. Playing 11 loaded.</div>}
-                <button onClick={doFetch} disabled={fetching} style={{width:"100%",padding:11,borderRadius:8,fontSize:10,cursor:fetching?"not-allowed":"pointer",background:C.crimson+"10",border:"1.5px solid "+C.crimson,color:C.crimson,fontFamily:"inherit",fontWeight:"bold",marginBottom:10}}>
-                  {fetching?<span style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><span style={{width:10,height:10,border:"2px solid "+C.crimson,borderTopColor:"transparent",borderRadius:"50%",display:"inline-block",animation:"spin 0.8s linear infinite"}}/>fetching...</span>:"📡 GET LIVE SCORE"}
+                <button onClick={doFetch} disabled={fetching} style={{width:"100%",padding:11,borderRadius:8,fontSize:10,cursor:fetching?"not-allowed":"pointer",background:fetching?C.bg:C.crimson+"10",border:"1.5px solid "+C.crimson,color:C.crimson,fontFamily:"inherit",fontWeight:"bold",marginBottom:4}}>
+                  {fetching?(
+                    <span style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+                      <span style={{width:10,height:10,border:"2px solid "+C.crimson,borderTopColor:"transparent",borderRadius:"50%",display:"inline-block",animation:"spin 0.8s linear infinite"}}/>
+                      {fetchStatus||"Fetching..."}
+                    </span>
+                  ):"📡 GET LIVE SCORE"}
                 </button>
+                {fetchError&&<div style={{fontSize:9,color:C.red,padding:"6px 10px",background:"#fff1f0",borderRadius:6,marginBottom:8,border:"1px solid #fecaca"}}>❌ {fetchError}</div>}
+                {!fetching&&fetchStatus&&!fetchError&&<div style={{fontSize:9,color:C.greenL,padding:"4px 10px",marginBottom:6}}>✓ {fetchStatus}</div>}
 
                 {pred&&(
                   <div>
