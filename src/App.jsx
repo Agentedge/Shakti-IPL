@@ -121,7 +121,7 @@ function calcPreMatchWinProb(t1,t2,venue,toss){
   const t1Hot=(SQUADS[t1]||[]).filter(p=>{const pl=PLAYERS_BASE[p];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.12;}).length;
   const t2Hot=(SQUADS[t2]||[]).filter(p=>{const pl=PLAYERS_BASE[p];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.12;}).length;
   prob+=(t1Hot-t2Hot)*0.022;
-  return Math.round(Math.max(28,Math.min(72,prob))*100);
+  return Math.round(Math.max(0.28,Math.min(0.72,prob))*100);
 }
 
 function calcLiveWinProb(score,wickets,overs,target,venue,battingTeam,chasingTeam,is2nd){
