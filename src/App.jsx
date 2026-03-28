@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from "recharts";
 import { VENUES_BASE, PLAYERS_BASE, BOWLERS_BASE, SQUADS, MATCHES } from "./shakti_db.js";
 import { H2H, TOSS_INTEL, PP_BOWLERS, IMPACT_PLAYERS } from "./shakti_extra.js";
+import { syncLastMatch, applyFormToPlayer, applyFormToBowler } from "./cricket_sync.js";
 
 // ── Constants ─────────────────────────────────────────────────
 const C = {
@@ -32,13 +33,9 @@ function loadState(){try{const r=localStorage.getItem(STORAGE_KEY);return r?JSON
 function saveState(s){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(s));}catch{}}
 
 // ── Bankroll ───────────────────────────────────────────────────
-function rawStake(br,stage,base,ks,edgeSize=5,wr=null){
-  const baseStake=stage===3?Math.max(0,br-base):Math.round(br*(ks?0.10:0.15));
-  // Dynamic sizing: scale up slightly for big edges, scale down for small ones
-  const edgeMult=edgeSize>=10?1.15:edgeSize>=7?1.08:edgeSize>=5?1.0:0.85;
-  // Win rate adjustment: if >65%, slight increase; if <50%, slight decrease
-  const wrMult=wr===null?1.0:wr>=65?1.05:wr<50?0.90:1.0;
-  return Math.round(baseStake*edgeMult*wrMult);
+function rawStake(br,stage,base,ks){
+  if(stage===3) return Math.max(0,br-base);
+  return Math.round(br*(ks?0.10:0.15));
 }
 function tStake(raw,tier){return Math.round(raw*(tier==="A"?1:tier==="B"?0.7:0.4));}
 function tierCol(t){return t==="A"?C.crimson:t==="B"?C.gold:C.muted;}
@@ -190,10 +187,10 @@ function calibratedVenue(vn,v2026){
   return{...base,pp:Math.round(base.pp*(1-w)+cal.avgPP*w),total:Math.round(base.total*(1-w)+cal.avgTotal*w)};
 }
 function predict(cfg){
-  const{venueName,battingTeam,bowlingTeam,striker,nonStriker,bowler,pitchType,weather,toss,lS,lW,lO,v2026,is2nd,target,impactPlayerAdded}=cfg;
+  const{venueName,battingTeam,bowlingTeam,striker,nonStriker,bowler,pitchType,weather,toss,lS,lW,lO,v2026,is2nd,target,impactPlayerAdded,strikerData,nonStrikerData,bowlerData,biasLog}=cfg;
   const v=calibratedVenue(venueName,v2026||{});
-  const p1=PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"];
-  const p2=PLAYERS_BASE[nonStriker]||PLAYERS_BASE["Other Batsman"];
+  const p1=strikerData||PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"];
+  const p2=nonStrikerData||PLAYERS_BASE[nonStriker]||PLAYERS_BASE["Other Batsman"];
   const teamPPSR=battingTeam?getTeamPPSR(battingTeam):(p1.ppSR+p2.ppSR)/2;
   const teamPPEcon=bowlingTeam?getTeamPPEconFull(bowlingTeam):(BOWLERS_BASE[bowler]?.ppEcon||8.5);
   const blendedPPSR=p1.ppSR*0.35+p2.ppSR*0.25+teamPPSR*0.40;
@@ -217,7 +214,10 @@ function predict(cfg){
   let pp;
   if(lS>0&&lO>0&&lO<6){pp=Math.round(lS+(lS/lO)*(6-lO)*(lO<3?1.02:0.98)*wp*pf);}
   else if(lO>=6){pp=lS>0?Math.min(lS,85):v.pp;}
-  else{pp=Math.round(v.pp*0.25+v.pp*avgPPAgg*0.25+v.pp*(1.4-br2)*0.20+v.pp*tf*0.10+v.pp*pf*0.10+v.pp*wf*0.05+v.pp*0.05+ipBonus);}
+  else{
+    const biasFix = biasLog?.[venueName]?.ppBias || 0;
+    pp=Math.round(v.pp*0.25+v.pp*avgPPAgg*0.25+v.pp*(1.4-br2)*0.20+v.pp*tf*0.10+v.pp*pf*0.10+v.pp*wf*0.05+v.pp*0.05+ipBonus+biasFix);
+  }
   const sc=pp/v.pp;
   const mf=avgMidAgg*0.85*pf*wp;
   const df=avgDeathAgg*pf*wf;
@@ -402,6 +402,11 @@ export default function Shakti(){
   const [accLog,setAccLog]=useState([]);
   const [logged,setLogged]=useState(0);
   const [playerForm,setPlayerForm]=useState({}); // {name:[{runs,balls,date}]}
+  const [bowlerForm,setBowlerForm]=useState({});
+  const [biasLog,setBiasLog]=useState({});
+  const [predictionLog,setPredictionLog]=useState([]);
+  const [syncing,setSyncing]=useState(false);
+  const [lastSync,setLastSync]=useState(null);
 
   // Match conditions
   const [battingFirst,setBattingFirst]=useState("");
@@ -456,11 +461,14 @@ export default function Shakti(){
     if(s.bets)setBets(s.bets);if(s.skipNext!=null)setSkipNext(s.skipNext);
     if(s.v2026)setV2026(s.v2026);if(s.accLog)setAccLog(s.accLog);
     if(s.logged!=null)setLogged(s.logged);if(s.playerForm)setPlayerForm(s.playerForm);
+    if(s.bowlerForm)setBowlerForm(s.bowlerForm);
+    if(s.biasLog)setBiasLog(s.biasLog);
+    if(s.predictionLog)setPredictionLog(s.predictionLog);
   },[]);
 
   // ── Save to localStorage ────────────────────────────────────
   useEffect(()=>{
-    saveState({br,base,peakBr,stage,cLoss,dLoss,bets,skipNext,v2026,accLog,logged,playerForm});
+    saveState({br,base,peakBr,stage,cLoss,dLoss,bets,skipNext,v2026,accLog,logged,playerForm,bowlerForm,biasLog,predictionLog});
   },[br,base,peakBr,stage,cLoss,dLoss,bets,skipNext,v2026,accLog,logged,playerForm]);
 
   // ── Derived ─────────────────────────────────────────────────
@@ -478,7 +486,11 @@ export default function Shakti(){
   const lO=liveData?.isLive?liveData.overs:0;
   const bTeam=battingFirst||(match?(toss==="batting"?match.t1:match.t2):"");
   const blTeam=bTeam&&match?(bTeam===match.t1?match.t2:match.t1):"";
-  const pred=match?predict({venueName:match.venue,battingTeam:bTeam,bowlingTeam:blTeam,striker,nonStriker:nonStrike,bowler,pitchType:pitch,weather:wx,toss,lS:is2nd?0:lS,lW:is2nd?0:lW,lO:is2nd?0:lO,v2026,is2nd,target,impactPlayerAdded:impactPlayer}):null;
+  // Apply form multipliers to current players
+  const strikerData = applyFormToPlayer(striker, PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"], playerForm, biasLog, match?.venue);
+  const nonStrikerData = applyFormToPlayer(nonStrike, PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"], playerForm, biasLog, match?.venue);
+  const bowlerData = applyFormToBowler(bowler, BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"], bowlerForm);
+  const pred=match?predict({venueName:match.venue,battingTeam:bTeam,bowlingTeam:blTeam,striker,nonStriker:nonStrike,bowler,pitchType:pitch,weather:wx,toss,lS:is2nd?0:lS,lW:is2nd?0:lW,lO:is2nd?0:lO,v2026,is2nd,target,impactPlayerAdded:impactPlayer,strikerData,nonStrikerData,bowlerData,biasLog}):null;
   const winProb=match?(liveData?.isLive?calcLiveWinProb(lS,lW,lO,is2nd?target:liveData?.target||0,match.venue,bTeam,blTeam,is2nd):calcPreMatchWinProb(match.t1,match.t2,match.venue,toss)):50;
 
   // Active match bets for correlation
@@ -493,7 +505,7 @@ export default function Shakti(){
 
   // Dynamic stake
   const edgeSize=Math.abs(ogGap);
-  const raw=rawStake(br,stage,base,ks,edgeSize,wr)*(recovery?.stakeAdj||1);
+  const raw=rawStake(br,stage,base,ks)*(recovery?.stakeAdj||1);
   const nextMS=MILESTONES.find(m=>m>br)||TARGET;
   const proj=seasonProjection(br,wr,bets,stage);
   const chartData=(()=>{let r=INIT_BR;const pts=[{n:0,v:INIT_BR}];bets.filter(b=>b.out!=="PENDING").forEach((b,i)=>{r+=b.out==="WIN"?b.stake:-b.stake;pts.push({n:i+1,v:r});});return pts;})();
@@ -587,6 +599,25 @@ export default function Shakti(){
     const ctx={br,stage,base,wr,cLoss,engAcc,match:match?match.t1+" vs "+match.t2:"none",lS,lO,lW,winProb:match?{[match.t1]:winProb,[match.t2]:100-winProb}:null,oddsGap:ogGap,ev:ogEV,seasonProj:proj};
     const reply=await claudeAsk(msg,ctx);
     setChatMsgs(p=>[...p,{role:"assistant",content:reply,ts:Date.now()}]);setChatBusy(false);
+  }
+
+  async function runSync(){
+    setSyncing(true);
+    try{
+      const result = await syncLastMatch(PLAYERS_BASE, BOWLERS_BASE, VENUES_BASE, {v2026,playerForm,bowlerForm,predictionLog,biasLog});
+      if(result.success){
+        if(result.newState.v2026) setV2026(result.newState.v2026);
+        if(result.newState.playerForm) setPlayerForm(result.newState.playerForm);
+        if(result.newState.bowlerForm) setBowlerForm(result.newState.bowlerForm);
+        if(result.newState.biasLog) setBiasLog(result.newState.biasLog);
+        setLastSync({...result, ts:Date.now()});
+      } else {
+        setLastSync({success:false, msg:result.msg, ts:Date.now()});
+      }
+    } catch(e){
+      setLastSync({success:false, msg:"Sync failed: "+e.message, ts:Date.now()});
+    }
+    setSyncing(false);
   }
 
   function openMatch(m){
@@ -689,7 +720,7 @@ export default function Shakti(){
                 {[1,2,3].map(s=>{const a=stage===s,d=stage>s,col=a?C.crimson:d?C.greenL:C.dim;return(
                   <div key={s} style={{flex:1,background:a?C.crimson+"10":d?C.greenL+"10":C.bg,border:"1.5px solid "+(a?C.crimson:d?C.greenL:C.border),borderRadius:10,padding:"10px 8px",textAlign:"center"}}>
                     <div style={{fontSize:8,color:col,letterSpacing:2,marginBottom:4,fontWeight:"bold"}}>S{s} {d?"✓":a?"◉":"○"}</div>
-                    <div style={{fontSize:13,fontWeight:"bold",color:col}}>₹{tStake(rawStake(br,s,base,ks,edgeSize,wr),"A").toLocaleString("en-IN")}</div>
+                    <div style={{fontSize:13,fontWeight:"bold",color:col}}>₹{tStake(rawStake(br,s,base,ks),"A").toLocaleString("en-IN")}</div>
                     <div style={{fontSize:8,color:C.dim,marginTop:3}}>{s<3?"15%":"profit"}</div>
                   </div>);})}
               </div>
@@ -1040,6 +1071,16 @@ export default function Shakti(){
         {tab==="learn"&&(
           <div>
             <div style={{fontSize:9,color:C.dim,letterSpacing:3,marginBottom:12,fontWeight:"bold"}}>🧠 POST-MATCH LEARNING</div>
+            <button onClick={runSync} disabled={syncing} style={{width:"100%",padding:"12px",borderRadius:10,fontSize:11,fontWeight:"bold",cursor:syncing?"not-allowed":"pointer",background:syncing?C.bg:"linear-gradient(135deg,#1e40af,#3b82f6)",border:syncing?"1px solid "+C.border:"none",color:syncing?C.dim:C.white,fontFamily:"inherit",letterSpacing:2,marginBottom:12}}>
+              {syncing?"⏳ SYNCING FROM CRICKETDATA...":"🔄 SYNC LAST MATCH — AUTO UPDATE"}
+            </button>
+            {lastSync&&<div style={{...card({marginBottom:12,padding:12,background:lastSync.success?"#f0fdf4":"#fff1f0",border:"1px solid "+(lastSync.success?C.greenL:"#fecaca")})}}>
+              <div style={{fontSize:9,color:lastSync.success?C.greenL:C.red,fontWeight:"bold",marginBottom:6}}>{lastSync.success?"✅ SYNC COMPLETE — "+lastSync.matchName:"❌ "+lastSync.msg}</div>
+              {lastSync.success&&lastSync.updates?.playersUpdated?.length>0&&<div style={{marginBottom:4}}><div style={{fontSize:8,color:C.dim,marginBottom:2}}>PLAYERS UPDATED:</div>{lastSync.updates.playersUpdated.map(p=><div key={p.name} style={{fontSize:9,color:C.text}}>{p.trend} {p.name}: {p.runs}runs SR{p.sr} → form×{p.formMult}</div>)}</div>}
+              {lastSync.success&&lastSync.updates?.bowlersUpdated?.length>0&&<div style={{marginBottom:4}}><div style={{fontSize:8,color:C.dim,marginBottom:2}}>BOWLERS UPDATED:</div>{lastSync.updates.bowlersUpdated.map(b=><div key={b.name} style={{fontSize:9,color:C.text}}>{b.trend} {b.name}: econ {b.econ} form×{b.formMult}</div>)}</div>}
+              {lastSync.success&&lastSync.updates?.venueUpdated&&<div style={{fontSize:9,color:C.sub,marginTop:4}}>📍 {lastSync.updates.venueUpdated.venue?.split(",")[0]}: PP {lastSync.updates.venueUpdated.newAvgPP} Total {lastSync.updates.venueUpdated.newAvgTotal} ({lastSync.updates.venueUpdated.matches}M)</div>}
+              {lastSync.success&&lastSync.updates?.biasDetected?.map((b,i)=><div key={i} style={{fontSize:9,color:C.gold,fontWeight:"bold",marginTop:4}}>⚡ {b.msg}</div>)}
+            </div>}
             <div style={{...card({marginBottom:12,padding:14})}}>
               <div style={{fontSize:9,color:C.dim,letterSpacing:3,marginBottom:10,fontWeight:"bold"}}>ENGINE ACCURACY — REAL DATA</div>
               <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
@@ -1133,4 +1174,3 @@ export default function Shakti(){
     </div>
   );
 }
-
