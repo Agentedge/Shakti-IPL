@@ -270,23 +270,54 @@ function verdict(val,line){
 // ── Live fetch ─────────────────────────────────────────────────
 async function fetchLiveClaude(t1,t2){
   try{
-    const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:500,tools:[{type:"web_search_20250305",name:"web_search"}],
-        system:'Return ONLY valid JSON: {"isLive":true,"battingTeam":"X","score":45,"wickets":1,"overs":3.4,"runRate":9.8,"lastOver":8,"recentBalls":"1 4 0 6 W 2","striker":"Name","nonStriker":"Name","bowler":"Name","target":null,"status":"text"}',
-        messages:[{role:"user",content:"Live IPL score "+t1+" vs "+t2+" right now. JSON only."}]})});
+    const r=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "x-api-key":import.meta.env.VITE_ANTHROPIC_KEY||"",
+        "anthropic-version":"2023-06-01",
+        "anthropic-dangerous-direct-browser-access":"true"
+      },
+      body:JSON.stringify({
+        model:"claude-sonnet-4-20250514",
+        max_tokens:500,
+        tools:[{type:"web_search_20250305",name:"web_search"}],
+        system:'Return ONLY valid JSON no other text: {"isLive":true,"battingTeam":"RCB","score":45,"wickets":1,"overs":3.4,"runRate":9.8,"lastOver":8,"recentBalls":"1 4 0 6 W 2","striker":"Virat Kohli","nonStriker":"Phil Salt","bowler":"Pat Cummins","target":null,"status":"RCB 45/1 in 3.4 overs"}',
+        messages:[{role:"user",content:"What is the live IPL cricket score right now for "+t1+" vs "+t2+"? Search and return JSON only."}]
+      })
+    });
     const d=await r.json();
-    return JSON.parse(d.content.filter(b=>b.type==="text").map(b=>b.text).join("").replace(/```json|```/g,"").trim());
-  }catch{return null;}
+    if(d.error)throw new Error(d.error.message);
+    const text=d.content.filter(b=>b.type==="text").map(b=>b.text).join("").replace(/```json|```/g,"").trim();
+    const parsed=JSON.parse(text);
+    return parsed;
+  }catch(e){
+    console.error("fetchLiveClaude error:",e.message);
+    return null;
+  }
 }
 async function claudeAsk(msg,ctx){
   try{
-    const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1200,tools:[{type:"web_search_20250305",name:"web_search"}],
+    const r=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "x-api-key":import.meta.env.VITE_ANTHROPIC_KEY||"",
+        "anthropic-version":"2023-06-01",
+        "anthropic-dangerous-direct-browser-access":"true"
+      },
+      body:JSON.stringify({
+        model:"claude-sonnet-4-20250514",
+        max_tokens:1200,
+        tools:[{type:"web_search_20250305",name:"web_search"}],
         system:"You are SHAKTI — elite IPL probabilistic trading analyst. Context: "+JSON.stringify(ctx)+". Platform odds: Favourite=1st number (stake₹100 profit=odds). Underdog=2nd (stake=odds profit₹100). Hedge=use potential winnings as hedge stake, no extra cash. Give specific numbers, BET/SKIP verdicts, EV calculations. Be direct.",
-        messages:[{role:"user",content:msg}]})});
+        messages:[{role:"user",content:msg}]
+      })
+    });
     const d=await r.json();
+    if(d.error)return "API error: "+d.error.message;
     return d.content.filter(b=>b.type==="text").map(b=>b.text).join("").trim();
-  }catch{return "Connection error.";}
+  }catch(e){return "Connection error: "+e.message;}
 }
 
 // ── Accuracy helpers ───────────────────────────────────────────
