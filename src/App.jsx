@@ -3,6 +3,7 @@ import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContai
 import { VENUES_BASE, PLAYERS_BASE, BOWLERS_BASE, SQUADS, MATCHES } from "./shakti_db.js";
 import { H2H, TOSS_INTEL, PP_BOWLERS, IMPACT_PLAYERS } from "./shakti_extra.js";
 import { syncLastMatch, applyFormToPlayer, applyFormToBowler } from "./cricket_sync.js";
+import { findMatchId, fetchTossAndPlaying11, fetchLiveScorecard, getRemainingBattingStrength, getRemainingBowlingStrength, BATTING_ORDERS, BOWLING_ROTATION } from "./playing11_engine.js";
 
 // ── Constants ─────────────────────────────────────────────────
 const C = {
@@ -187,7 +188,7 @@ function calibratedVenue(vn,v2026){
   return{...base,pp:Math.round(base.pp*(1-w)+cal.avgPP*w),total:Math.round(base.total*(1-w)+cal.avgTotal*w)};
 }
 function predict(cfg){
-  const{venueName,battingTeam,bowlingTeam,striker,nonStriker,bowler,pitchType,weather,toss,lS,lW,lO,v2026,is2nd,target,impactPlayerAdded,strikerData,nonStrikerData,bowlerData,biasLog}=cfg;
+  const{venueName,battingTeam,bowlingTeam,striker,nonStriker,bowler,pitchType,weather,toss,lS,lW,lO,v2026,is2nd,target,impactPlayerAdded,strikerData,nonStrikerData,bowlerData,biasLog,remainingBat,remainingBowl}=cfg;
   const v=calibratedVenue(venueName,v2026||{});
   const p1=strikerData||PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"];
   const p2=nonStrikerData||PLAYERS_BASE[nonStriker]||PLAYERS_BASE["Other Batsman"];
@@ -198,8 +199,11 @@ function predict(cfg){
   // Impact player adjustment
   const ipBonus=impactPlayerAdded?(IMPACT_PLAYERS[battingTeam]?.find(ip=>ip.n===impactPlayerAdded)?.runsAdded||0)*0.4:0;
   const avgPPAgg=blendedPPSR/150;
-  const avgMidAgg=((p1.midSR||130)+(p2.midSR||130))/2/135;
-  const avgDeathAgg=((p1.deathSR||155)+(p2.deathSR||155))/2/165;
+  // Blend current batsmen with remaining lineup for mid/death projection
+  const remMidSR=remainingBat?.avgMidSR||((p1.midSR||130)+(p2.midSR||130))/2;
+  const remDeathSR=remainingBat?.avgDeathSR||((p1.deathSR||155)+(p2.deathSR||155))/2;
+  const avgMidAgg=(lO<6?(p1.midSR||130)*0.4+(p2.midSR||130)*0.3+remMidSR*0.3:remMidSR)/135;
+  const avgDeathAgg=(lO<15?(p1.deathSR||155)*0.3+(p2.deathSR||155)*0.2+remDeathSR*0.5:remDeathSR+(remainingBat?.hasFinisher?10:0))/165;
   const pf=pitchType==="batting"?1.12:pitchType==="seaming"?0.88:pitchType==="turning"?0.85:pitchType==="slow"?0.82:1.0;
   const wf=weather==="dew"?1.08:weather==="overcast"?0.89:weather==="humid"?0.95:1.0;
   const tf=toss==="chasing"?1.06:0.96;
@@ -264,7 +268,7 @@ function verdict(val,line){
 }
 
 // ── Live fetch ─────────────────────────────────────────────────
-async function fetchLive(t1,t2){
+async function fetchLiveClaude(t1,t2){
   try{
     const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:500,tools:[{type:"web_search_20250305",name:"web_search"}],
@@ -419,6 +423,12 @@ export default function Shakti(){
   const [is2nd,setIs2nd]=useState(false);
   const [target,setTarget]=useState(0);
   const [impactPlayer,setImpactPlayer]=useState("");
+  const [matchId,setMatchId]=useState(null);
+  const [playing11,setPlaying11]=useState({});
+  const [battedPlayers,setBattedPlayers]=useState([]);
+  const [bowlerSpells,setBowlerSpells]=useState([]);
+  const [fetchingToss,setFetchingToss]=useState(false);
+  const [tossData,setTossData]=useState(null);
   const [lines,setLines]=useState({});
   const [lineHist,setLineHist]=useState({});
   const [lineAlerts,setLineAlerts]=useState([]);
@@ -461,6 +471,7 @@ export default function Shakti(){
     if(s.bets)setBets(s.bets);if(s.skipNext!=null)setSkipNext(s.skipNext);
     if(s.v2026)setV2026(s.v2026);if(s.accLog)setAccLog(s.accLog);
     if(s.logged!=null)setLogged(s.logged);if(s.playerForm)setPlayerForm(s.playerForm);
+    if(s.playing11)setPlaying11(s.playing11);
     if(s.bowlerForm)setBowlerForm(s.bowlerForm);
     if(s.biasLog)setBiasLog(s.biasLog);
     if(s.predictionLog)setPredictionLog(s.predictionLog);
@@ -468,7 +479,7 @@ export default function Shakti(){
 
   // ── Save to localStorage ────────────────────────────────────
   useEffect(()=>{
-    saveState({br,base,peakBr,stage,cLoss,dLoss,bets,skipNext,v2026,accLog,logged,playerForm,bowlerForm,biasLog,predictionLog});
+    saveState({br,base,peakBr,stage,cLoss,dLoss,bets,skipNext,v2026,accLog,logged,playerForm,bowlerForm,biasLog,predictionLog,playing11});
   },[br,base,peakBr,stage,cLoss,dLoss,bets,skipNext,v2026,accLog,logged,playerForm]);
 
   // ── Derived ─────────────────────────────────────────────────
@@ -490,7 +501,7 @@ export default function Shakti(){
   const strikerData = applyFormToPlayer(striker, PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"], playerForm, biasLog, match?.venue);
   const nonStrikerData = applyFormToPlayer(nonStrike, PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"], playerForm, biasLog, match?.venue);
   const bowlerData = applyFormToBowler(bowler, BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"], bowlerForm);
-  const pred=match?predict({venueName:match.venue,battingTeam:bTeam,bowlingTeam:blTeam,striker,nonStriker:nonStrike,bowler,pitchType:pitch,weather:wx,toss,lS:is2nd?0:lS,lW:is2nd?0:lW,lO:is2nd?0:lO,v2026,is2nd,target,impactPlayerAdded:impactPlayer,strikerData,nonStrikerData,bowlerData,biasLog}):null;
+  const pred=match?predict({venueName:match.venue,battingTeam:bTeam,bowlingTeam:blTeam,striker,nonStriker:nonStrike,bowler,pitchType:pitch,weather:wx,toss,lS:is2nd?0:lS,lW:is2nd?0:lW,lO:is2nd?0:lO,v2026,is2nd,target,impactPlayerAdded:impactPlayer,strikerData,nonStrikerData,bowlerData,biasLog,remainingBat,remainingBowl}):null;
   const winProb=match?(liveData?.isLive?calcLiveWinProb(lS,lW,lO,is2nd?target:liveData?.target||0,match.venue,bTeam,blTeam,is2nd):calcPreMatchWinProb(match.t1,match.t2,match.venue,toss)):50;
 
   // Active match bets for correlation
@@ -510,24 +521,66 @@ export default function Shakti(){
   const proj=seasonProjection(br,wr,bets,stage);
   const chartData=(()=>{let r=INIT_BR;const pts=[{n:0,v:INIT_BR}];bets.filter(b=>b.out!=="PENDING").forEach((b,i)=>{r+=b.out==="WIN"?b.stake:-b.stake;pts.push({n:i+1,v:r});});return pts;})();
   const matchPnL=(()=>{const map={};bets.forEach(b=>{if(!map[b.match])map[b.match]={m:b.match,p:0};if(b.out==="WIN")map[b.match].p+=b.stake;if(b.out==="LOSS")map[b.match].p-=b.stake;});return Object.values(map);})();
+  // Remaining batting and bowling strength
+  const remainingBat = match && bTeam ?
+    getRemainingBattingStrength(bTeam, battedPlayers, [striker,nonStrike], playing11[bTeam]||[], PLAYERS_BASE) :
+    {avgMidSR:130, avgDeathSR:155, yetToBat:[], hasFinisher:false};
+  const remainingBowl = match && blTeam ?
+    getRemainingBowlingStrength(blTeam, bowlerSpells, lO, BOWLERS_BASE) :
+    {avgDeathEcon:9.5, remainingBowlers:[]};
   const todayBets=bets.filter(b=>new Date(b.ts).toDateString()===new Date().toDateString());
   const todayPnL=todayBets.filter(b=>b.out!=="PENDING").reduce((s,b)=>s+(b.out==="WIN"?b.stake:-b.stake),0);
 
   const doFetch=useCallback(async()=>{
     if(!match)return;setFetching(true);
-    const d=await fetchLive(match.t1,match.t2);
-    if(d){setLiveData(d);const now=new Date();setLastUpd(now.getHours()+":"+String(now.getMinutes()).padStart(2,"0"));
-      if(d.isLive){
-        if(PLAYERS_BASE[d.striker])setStriker(d.striker);
-        if(PLAYERS_BASE[d.nonStriker])setNonStrike(d.nonStriker);
-        if(BOWLERS_BASE[d.bowler])setBowler(d.bowler);
-        if((d.wickets||0)>prevWkts)setShowWkt(true);
-        setPrevWkts(d.wickets||0);
-        if(d.target&&d.target>0){setIs2nd(true);setTarget(d.target);}
+    try{
+      // Try CricketData first if we have a matchId
+      let d=null;
+      let usedCricData=false;
+      if(matchId){
+        const scorecard=await fetchLiveScorecard(matchId);
+        if(scorecard?.matchStarted){
+          d={
+            isLive:!scorecard.matchEnded,
+            battingTeam:scorecard.battingTeam,
+            score:scorecard.score,
+            wickets:scorecard.wickets,
+            overs:scorecard.overs,
+            runRate:scorecard.runRate,
+            striker:scorecard.striker,
+            nonStriker:scorecard.nonStriker,
+            bowler:scorecard.bowler,
+            target:scorecard.target,
+            status:scorecard.matchEnded?"Match ended":"Live",
+            recentBalls:"",
+          };
+          // Update batting/bowling tracking
+          if(scorecard.battedPlayers?.length) setBattedPlayers(scorecard.battedPlayers);
+          if(scorecard.bowlerSpells?.length) setBowlerSpells(scorecard.bowlerSpells);
+          usedCricData=true;
+        }
       }
-    }
+      // Fallback to Claude web search
+      if(!d){
+        const{fetchLive}=await import("./fetchLive.js").catch(()=>({fetchLive:null}));
+        if(fetchLive) d=await fetchLive(match.t1,match.t2);
+        else d=await fetchLiveClaude(match.t1,match.t2);
+      }
+      if(d){
+        setLiveData(d);
+        const now=new Date();setLastUpd(now.getHours()+":"+String(now.getMinutes()).padStart(2,"0")+(usedCricData?" CricData":" Web"));
+        if(d.isLive){
+          if(PLAYERS_BASE[d.striker])setStriker(d.striker);
+          if(PLAYERS_BASE[d.nonStriker])setNonStrike(d.nonStriker);
+          if(BOWLERS_BASE[d.bowler])setBowler(d.bowler);
+          if((d.wickets||0)>prevWkts)setShowWkt(true);
+          setPrevWkts(d.wickets||0);
+          if(d.target&&d.target>0){setIs2nd(true);setTarget(d.target);}
+        }
+      }
+    }catch(e){console.error("doFetch error:",e);}
     setFetching(false);
-  },[match,prevWkts]);
+  },[match,matchId,prevWkts]);
 
   useEffect(()=>{
     if(tab==="match"&&match){setLiveData(null);setPrevWkts(0);doFetch();timerRef.current=setInterval(doFetch,60000);}
@@ -618,6 +671,50 @@ export default function Shakti(){
       setLastSync({success:false, msg:"Sync failed: "+e.message, ts:Date.now()});
     }
     setSyncing(false);
+  }
+
+  async function fetchTossAndLineup(){
+    if(!match)return;
+    setFetchingToss(true);
+    try{
+      // Find match ID
+      let id=matchId;
+      if(!id){
+        id=await findMatchId(match.t1,match.t2);
+        if(id)setMatchId(id);
+      }
+      if(!id){
+        setTossData({error:"Match not found in CricketData yet. Try closer to match time."});
+        setFetchingToss(false);return;
+      }
+      // Fetch toss + playing 11
+      const data=await fetchTossAndPlaying11(id);
+      if(!data){setTossData({error:"Could not fetch match info"});setFetchingToss(false);return;}
+      setTossData(data);
+      // Auto-set playing 11
+      if(data.teams&&Object.keys(data.teams).length>0){
+        setPlaying11(data.teams);
+      }
+      // Auto-set toss
+      if(data.tossWinner&&data.tossChoice){
+        const battingTeamCode=data.tossChoice==="bat"?
+          (data.tossWinner.includes(match.t1)?match.t1:match.t2):
+          (data.tossWinner.includes(match.t1)?match.t2:match.t1);
+        setBattingFirst(battingTeamCode);
+        setToss(battingTeamCode===match.t1?"batting":"chasing");
+        // Auto-set openers
+        const order=BATTING_ORDERS[battingTeamCode]||[];
+        const p11=data.teams[battingTeamCode]||[];
+        const confirmedOpeners=order.filter(p=>p11.length===0||p11.some(p11p=>p11p.includes(p.split(" ").slice(-1)[0])));
+        if(confirmedOpeners[0])setStriker(confirmedOpeners[0]);
+        if(confirmedOpeners[1])setNonStrike(confirmedOpeners[1]);
+        // Auto-set PP bowler
+        const bowlingTeam=battingTeamCode===match.t1?match.t2:match.t1;
+        const ppBowlers=BOWLING_ROTATION[bowlingTeam]?.pp||[];
+        if(ppBowlers[0])setBowler(ppBowlers[0]);
+      }
+    }catch(e){setTossData({error:"Error: "+e.message});}
+    setFetchingToss(false);
   }
 
   function openMatch(m){
@@ -806,7 +903,118 @@ export default function Shakti(){
             {/* PREDICT */}
             {sub==="predict"&&(
               <div>
-                {liveData?.isLive&&<div style={{...card({marginBottom:10,background:C.crimson+"08",border:"1.5px solid "+C.crimsonL,padding:12})}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><div style={{display:"flex",gap:8,alignItems:"center"}}><div style={{width:6,height:6,borderRadius:"50%",background:C.crimsonL,animation:"blink 1s infinite"}}/><span style={{fontSize:10,fontWeight:"bold",color:C.crimson}}>{liveData.battingTeam}</span><span style={{fontSize:20,fontWeight:"bold",color:C.text}}>{lS}/{lW}</span><span style={{fontSize:11,color:C.muted}}>({lO} ov)</span></div><div style={{textAlign:"right"}}><div style={{fontSize:9,color:C.sub}}>RR {liveData.runRate}</div>{liveData.target&&<div style={{fontSize:8,color:C.gold}}>Target {liveData.target}</div>}<div style={{fontSize:7,color:C.dim}}>upd {lastUpd}</div></div></div>{liveData.recentBalls&&<div style={{fontSize:10,color:C.muted,letterSpacing:3,marginBottom:4}}>{liveData.recentBalls}</div>}{liveData.isLive&&<div style={{display:"flex",gap:4}}><div style={{fontSize:8,color:C.dim}}>⚡ RR req:</div><div style={{fontSize:8,color:is2nd&&target>0?(lS&&lO?(((target-lS)/((20-lO)*6))*6)>9?C.red:C.greenL:C.dim):C.dim,fontWeight:"bold"}}>{is2nd&&target>0&&lS&&lO?(((target-lS)/((20-lO)*6))*6).toFixed(1):"-"}</div></div>}</div>}
+                {liveData?.isLive&&(
+                  <div style={{...card({marginBottom:10,padding:0,overflow:"hidden",border:"1.5px solid "+C.crimsonL})}}>
+                    {/* Score header */}
+                    <div style={{background:C.crimson+"08",padding:"10px 12px",borderBottom:"1px solid "+C.border}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                          <div style={{width:6,height:6,borderRadius:"50%",background:C.crimsonL,animation:"blink 1s infinite"}}/>
+                          <span style={{fontSize:10,fontWeight:"bold",color:C.crimson}}>{liveData.battingTeam}</span>
+                          <span style={{fontSize:22,fontWeight:"bold",color:C.text}}>{lS}/{lW}</span>
+                          <span style={{fontSize:11,color:C.muted}}>({lO} ov)</span>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontSize:10,fontWeight:"bold",color:C.gold}}>RR {liveData.runRate}</div>
+                          {liveData.target&&<div style={{fontSize:9,color:C.gold}}>Target {liveData.target}</div>}
+                          <div style={{fontSize:7,color:C.dim}}>upd {lastUpd}</div>
+                        </div>
+                      </div>
+                      {is2nd&&target>0&&lS&&lO>0&&(
+                        <div style={{display:"flex",gap:16,padding:"6px 0",borderTop:"1px solid "+C.border+"40"}}>
+                          <div style={{fontSize:9,color:C.dim}}>Need <span style={{color:C.crimson,fontWeight:"bold"}}>{target-lS}</span> off <span style={{color:C.crimson,fontWeight:"bold"}}>{Math.round((20-lO)*6)}</span> balls</div>
+                          <div style={{fontSize:9,color:C.dim}}>RRR <span style={{fontWeight:"bold",color:(((target-lS)/Math.max(1,(20-lO)*6))*6)>10?C.red:(((target-lS)/Math.max(1,(20-lO)*6))*6)>8?C.gold:C.greenL}}>{(((target-lS)/Math.max(1,(20-lO)*6))*6).toFixed(1)}</span></div>
+                        </div>
+                      )}
+                      {liveData.recentBalls&&(
+                        <div style={{display:"flex",gap:4,alignItems:"center",marginTop:4}}>
+                          <span style={{fontSize:8,color:C.dim}}>Last 6:</span>
+                          {liveData.recentBalls.split(" ").map((b,i)=>(
+                            <span key={i} style={{width:20,height:20,borderRadius:"50%",background:b==="6"?C.gold+"30":b==="4"?C.greenL+"20":b==="W"?C.crimson+"30":C.bg,border:"1px solid "+(b==="6"?C.goldL:b==="4"?C.greenL:b==="W"?C.crimson:C.border),display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:"bold",color:b==="6"?C.gold:b==="4"?C.greenL:b==="W"?C.crimson:C.muted}}>{b}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {/* Batting scorecard */}
+                    <div style={{padding:"8px 12px",borderBottom:"1px solid "+C.border}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                        <div style={{fontSize:7,color:C.dim,fontWeight:"bold",letterSpacing:2,flex:1}}>BATTER</div>
+                        <div style={{display:"flex",gap:0,width:96,justifyContent:"space-between"}}>
+                          {["R","B","SR"].map(h=><span key={h} style={{fontSize:7,color:C.dim,fontWeight:"bold",width:32,textAlign:"right"}}>{h}</span>)}
+                        </div>
+                      </div>
+                      {/* Current batsmen */}
+                      {[{name:striker,isStriker:true},{name:nonStrike,isStriker:false}].filter(b=>b.name&&b.name!=="Other Batsman").map(({name,isStriker})=>{
+                        const inn=liveData?.innings?.find(i=>!i.overs||i.overs<20)||liveData?.innings?.[liveData?.innings?.length-1];
+                        const b=inn?.batting?.find(bt=>bt.name?.includes(name.split(" ").slice(-1)[0])||name.includes(bt.name?.split(" ").slice(-1)[0]||"x"));
+                        return(
+                          <div key={name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3,padding:"5px 6px",background:isStriker?C.crimson+"08":C.bg,borderRadius:6,border:isStriker?"1px solid "+C.crimson+"20":"none"}}>
+                            <div style={{display:"flex",alignItems:"center",gap:5,flex:1}}>
+                              <span style={{fontSize:9,color:isStriker?C.crimson:C.dim}}>{isStriker?"●":"○"}</span>
+                              <span style={{fontSize:10,fontWeight:isStriker?"bold":"normal",color:C.text}}>{name.split(" ").slice(-1)[0]}</span>
+                              {isStriker&&<span style={{fontSize:9,color:C.crimson,fontWeight:"bold"}}>*</span>}
+                            </div>
+                            <div style={{display:"flex",width:96,justifyContent:"space-between"}}>
+                              <span style={{fontSize:11,fontWeight:"bold",color:isStriker?C.crimson:C.text,width:32,textAlign:"right"}}>{b?.runs??"-"}</span>
+                              <span style={{fontSize:10,color:C.muted,width:32,textAlign:"right"}}>{b?.balls??"-"}</span>
+                              <span style={{fontSize:10,color:b?.sr>150?C.greenL:b?.sr>100?C.gold:b?.sr>0?C.red:C.muted,fontWeight:"bold",width:32,textAlign:"right"}}>{b?.sr??"-"}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {/* Already dismissed */}
+                      {(()=>{
+                        const inn=liveData?.innings?.find(i=>!i.overs||i.overs<20)||liveData?.innings?.[liveData?.innings?.length-1];
+                        const out=(inn?.batting||[]).filter(b=>b.out&&b.balls>0).slice(-3);
+                        return out.map(b=>(
+                          <div key={b.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2,padding:"3px 6px",opacity:0.5}}>
+                            <span style={{fontSize:9,color:C.muted,flex:1}}>{b.name?.split(" ").slice(-1)[0]}</span>
+                            <div style={{display:"flex",width:96,justifyContent:"space-between"}}>
+                              <span style={{fontSize:9,color:C.muted,width:32,textAlign:"right"}}>{b.runs}</span>
+                              <span style={{fontSize:9,color:C.muted,width:32,textAlign:"right"}}>{b.balls}</span>
+                              <span style={{fontSize:9,color:C.muted,width:32,textAlign:"right"}}>{b.sr}</span>
+                            </div>
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                    {/* Bowling scorecard */}
+                    <div style={{padding:"8px 12px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                        <div style={{fontSize:7,color:C.dim,fontWeight:"bold",letterSpacing:2,flex:1}}>BOWLER</div>
+                        <div style={{display:"flex",width:112,justifyContent:"space-between"}}>
+                          {["O","R","W","ECO"].map(h=><span key={h} style={{fontSize:7,color:C.dim,fontWeight:"bold",width:28,textAlign:"right"}}>{h}</span>)}
+                        </div>
+                      </div>
+                      {bowlerSpells.length>0?(
+                        bowlerSpells.slice(0,5).map(b=>{
+                          const isCurrent=bowler&&(b.name?.includes(bowler.split(" ").slice(-1)[0])||bowler.includes(b.name?.split(" ").slice(-1)[0]||"x"));
+                          return(
+                            <div key={b.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3,padding:"4px 6px",background:isCurrent?C.gold+"10":C.bg,borderRadius:6,border:isCurrent?"1px solid "+C.goldL:"none"}}>
+                              <div style={{display:"flex",alignItems:"center",gap:4,flex:1}}>
+                                {isCurrent&&<span style={{fontSize:8,color:C.gold}}>●</span>}
+                                <span style={{fontSize:9,fontWeight:isCurrent?"bold":"normal",color:C.text}}>{b.name?.split(" ").slice(-1)[0]}</span>
+                              </div>
+                              <div style={{display:"flex",width:112,justifyContent:"space-between"}}>
+                                <span style={{fontSize:9,color:C.muted,width:28,textAlign:"right"}}>{b.overs}</span>
+                                <span style={{fontSize:9,color:C.muted,width:28,textAlign:"right"}}>{b.runs}</span>
+                                <span style={{fontSize:9,color:b.wickets>0?C.crimson:C.muted,fontWeight:b.wickets>0?"bold":"normal",width:28,textAlign:"right"}}>{b.wickets}</span>
+                                <span style={{fontSize:9,color:b.econ<7?C.greenL:b.econ<9?C.gold:C.red,fontWeight:"bold",width:28,textAlign:"right"}}>{b.econ}</span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      ):(
+                        bowler&&bowler!=="Average Bowler"&&(
+                          <div style={{padding:"4px 6px",background:C.gold+"10",borderRadius:6,border:"1px solid "+C.goldL}}>
+                            <span style={{fontSize:9,color:C.text,fontWeight:"bold"}}>● {bowler.split(" ").slice(-1)[0]}</span>
+                            <span style={{fontSize:8,color:C.muted,marginLeft:8}}>currently bowling</span>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {!liveData?.isLive&&<div style={{display:"flex",gap:8,marginBottom:10}}><div style={{flex:1}}><div style={{fontSize:8,color:C.dim,marginBottom:3,fontWeight:"bold"}}>BATS FIRST</div><div style={{display:"flex",gap:6}}><button onClick={()=>{setToss("batting");setBattingFirst(match.t1);}} style={{...tbtn(battingFirst===match.t1,TEAM_COL[match.t1]),flex:1,fontSize:9}}>{match.t1}</button><button onClick={()=>{setToss("chasing");setBattingFirst(match.t2);}} style={{...tbtn(battingFirst===match.t2,TEAM_COL[match.t2]),flex:1,fontSize:9}}>{match.t2}</button></div></div><div style={{flex:1}}><div style={{fontSize:8,color:C.dim,marginBottom:3,fontWeight:"bold"}}>PITCH</div><select value={pitch} onChange={e=>setPitch(e.target.value)} style={sel}><option value="balanced">Balanced</option><option value="batting">Batting</option><option value="seaming">Seaming</option><option value="turning">Turning</option><option value="slow">Slow</option></select></div></div>}
 
@@ -821,12 +1029,35 @@ export default function Shakti(){
                 <div style={{marginBottom:10}}><div style={{fontSize:8,color:C.dim,marginBottom:3,fontWeight:"bold"}}>IMPACT PLAYER (if announced)</div><select value={impactPlayer} onChange={e=>setImpactPlayer(e.target.value)} style={sel}><option value="">None announced</option>{(IMPACT_PLAYERS[bTeam||match.t1]||[]).map(ip=><option key={ip.n} value={ip.n}>{ip.n} (+{ip.runsAdded} runs est)</option>)}</select></div>
                 {impactPlayer&&pred?.ipBonus>0&&<div style={{marginBottom:10,padding:"8px 10px",background:C.gold+"10",borderRadius:8,border:"1px solid "+C.goldL}}><div style={{fontSize:9,color:C.gold,fontWeight:"bold"}}>⚡ IMPACT: +{Math.round(pred.ipBonus)} runs added to projection</div></div>}
 
+                {!liveData?.isLive&&<button onClick={fetchTossAndLineup} disabled={fetchingToss} style={{width:"100%",padding:11,borderRadius:8,fontSize:10,cursor:fetchingToss?"not-allowed":"pointer",background:"#eff6ff",border:"1.5px solid #3b82f6",color:"#1e40af",fontFamily:"inherit",fontWeight:"bold",marginBottom:8}}>
+                  {fetchingToss?"⏳ FETCHING TOSS & PLAYING 11...":"🏏 GET TOSS & PLAYING 11"}
+                </button>}
+                {tossData?.error&&<div style={{fontSize:9,color:C.red,marginBottom:8,padding:"6px 10px",background:"#fff1f0",borderRadius:6}}>{tossData.error}</div>}
+                {tossData&&!tossData.error&&<div style={{fontSize:9,color:C.greenL,marginBottom:8,padding:"6px 10px",background:"#f0fdf4",borderRadius:6,border:"1px solid "+C.greenL}}>✅ {tossData.tossWinner?.split(" ").slice(-2).join(" ")} won toss → {tossData.tossChoice==="bat"?"batting":"fielding"} first. Playing 11 loaded.</div>}
                 <button onClick={doFetch} disabled={fetching} style={{width:"100%",padding:11,borderRadius:8,fontSize:10,cursor:fetching?"not-allowed":"pointer",background:C.crimson+"10",border:"1.5px solid "+C.crimson,color:C.crimson,fontFamily:"inherit",fontWeight:"bold",marginBottom:10}}>
                   {fetching?<span style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><span style={{width:10,height:10,border:"2px solid "+C.crimson,borderTopColor:"transparent",borderRadius:"50%",display:"inline-block",animation:"spin 0.8s linear infinite"}}/>fetching...</span>:"📡 GET LIVE SCORE"}
                 </button>
 
                 {pred&&(
                   <div>
+                    {/* Remaining batting depth */}
+                    {remainingBat.yetToBat.length>0&&(
+                      <div style={{...card({marginBottom:10,padding:10})}}>
+                        <div style={{fontSize:8,color:C.dim,letterSpacing:2,marginBottom:6,fontWeight:"bold"}}>BATTING DEPTH REMAINING</div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:6}}>
+                          {remainingBat.yetToBat.slice(0,6).map(p=>(
+                            <div key={p} style={{padding:"3px 8px",borderRadius:12,background:C.bg,border:"1px solid "+C.border,fontSize:8,color:C.text}}>
+                              {p.split(" ").slice(-1)[0]}
+                              {(PLAYERS_BASE[p]?.deathSR||0)>180&&<span style={{color:C.gold}}> ★</span>}
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{display:"flex",gap:12}}>
+                          <div style={{fontSize:8,color:C.dim}}>Mid SR avg: <span style={{color:C.crimson,fontWeight:"bold"}}>{remainingBat.avgMidSR}</span></div>
+                          <div style={{fontSize:8,color:C.dim}}>Death SR avg: <span style={{color:remainingBat.hasFinisher?C.greenL:C.crimson,fontWeight:"bold"}}>{remainingBat.avgDeathSR}{remainingBat.hasFinisher?" ★":""}</span></div>
+                        </div>
+                      </div>
+                    )}
                     {/* Win prob bar */}
                     <div style={{...card({marginBottom:10,padding:12})}}>
                       <div style={{fontSize:9,color:C.dim,letterSpacing:3,marginBottom:8,fontWeight:"bold"}}>WIN PROBABILITY</div>
