@@ -665,19 +665,106 @@ export default function Shakti(){
 
   async function runSync(){
     setSyncing(true);
+    setLastSync(null);
     try{
-      const result = await syncLastMatch(PLAYERS_BASE, BOWLERS_BASE, VENUES_BASE, {v2026,playerForm,bowlerForm,predictionLog,biasLog});
-      if(result.success){
-        if(result.newState.v2026) setV2026(result.newState.v2026);
-        if(result.newState.playerForm) setPlayerForm(result.newState.playerForm);
-        if(result.newState.bowlerForm) setBowlerForm(result.newState.bowlerForm);
-        if(result.newState.biasLog) setBiasLog(result.newState.biasLog);
-        setLastSync({...result, ts:Date.now()});
-      } else {
-        setLastSync({success:false, msg:result.msg, ts:Date.now()});
+      // Call server-side sync endpoint
+      const r = await fetch("/api/sync");
+      const result = await r.json();
+
+      if(!result.success){
+        setLastSync({success:false, msg:result.msg});
+        setSyncing(false);
+        return;
       }
-    } catch(e){
-      setLastSync({success:false, msg:"Sync failed: "+e.message, ts:Date.now()});
+
+      const updates = {playersUpdated:[], bowlersUpdated:[], venueUpdated:null, biasDetected:[]};
+
+      // Update venue calibration
+      if(result.venueMapped && result.ppRuns && result.totalRuns){
+        const vn = result.venueMapped;
+        setV2026(prev=>{
+          const e=prev[vn]||{matches:0,avgPP:result.ppRuns,avgTotal:result.totalRuns};
+          const n=e.matches+1;
+          return{...prev,[vn]:{
+            matches:n,
+            avgPP:Math.round((e.avgPP*(n-1)+result.ppRuns)/n),
+            avgTotal:Math.round((e.avgTotal*(n-1)+result.totalRuns)/n)
+          }};
+        });
+        updates.venueUpdated = {
+          venue:vn,
+          newAvgPP:result.ppRuns,
+          newAvgTotal:result.totalRuns,
+          matches:1
+        };
+      }
+
+      // Update player form from batting data
+      const newPlayerForm = {...playerForm};
+      const newBowlerForm = {...bowlerForm};
+
+      result.innings.forEach(inn=>{
+        // Batting form
+        (inn.batting||[]).forEach(b=>{
+          if(!b.name||b.balls<4) return;
+          const player = PLAYERS_BASE[b.name];
+          if(!player) return;
+          if(!newPlayerForm[b.name]) newPlayerForm[b.name]=[];
+          newPlayerForm[b.name]=[...newPlayerForm[b.name],{runs:b.runs,balls:b.balls,sr:b.sr,date:result.date}].slice(-5);
+          // Calculate form multiplier
+          const recent = newPlayerForm[b.name];
+          const weights = [0.40,0.30,0.15,0.10,0.05];
+          const wSR = recent.reduce((s,x,i)=>s+(x.sr||100)*(weights[recent.length-1-i]||0.05),0);
+          const wTotal = recent.reduce((s,x,i)=>s+(weights[recent.length-1-i]||0.05),0);
+          const avgSR = wSR/wTotal;
+          const mult = Math.round(Math.max(0.75,Math.min(1.25,avgSR/Math.max(1,player.ppSR)))*100)/100;
+          if(Math.abs(mult-1.0)>0.03){
+            updates.playersUpdated.push({
+              name:b.name,
+              runs:b.runs,
+              sr:b.sr,
+              formMult:mult,
+              trend:mult>1.08?"🔥 HOT":mult<0.92?"❄️ COLD":"→ NEUTRAL"
+            });
+          }
+        });
+
+        // Bowling form
+        (inn.bowling||[]).forEach(b=>{
+          if(!b.name||b.overs<1) return;
+          const bowler = BOWLERS_BASE[b.name];
+          if(!bowler) return;
+          if(!newBowlerForm[b.name]) newBowlerForm[b.name]=[];
+          newBowlerForm[b.name]=[...newBowlerForm[b.name],{overs:b.overs,runs:b.runs,wickets:b.wickets,econ:b.econ,date:result.date}].slice(-5);
+          const recent = newBowlerForm[b.name];
+          const weights = [0.40,0.30,0.15,0.10,0.05];
+          const wE = recent.reduce((s,x,i)=>s+(x.econ||bowler.ppEcon)*(weights[recent.length-1-i]||0.05),0);
+          const wTotal = recent.reduce((s,x,i)=>s+(weights[recent.length-1-i]||0.05),0);
+          const avgEcon = Math.round(wE/wTotal*100)/100;
+          const mult = Math.round(Math.max(0.80,Math.min(1.20,avgEcon/Math.max(1,bowler.ppEcon)))*100)/100;
+          if(Math.abs(mult-1.0)>0.03){
+            updates.bowlersUpdated.push({
+              name:b.name,
+              econ:b.econ,
+              formMult:mult,
+              trend:mult<0.92?"🔥 SHARP":mult>1.08?"❄️ OFF FORM":"→ NORMAL"
+            });
+          }
+        });
+      });
+
+      setPlayerForm(newPlayerForm);
+      setBowlerForm(newBowlerForm);
+
+      setLastSync({
+        success:true,
+        matchName:result.matchName,
+        date:result.date,
+        updates
+      });
+
+    }catch(e){
+      setLastSync({success:false, msg:"Sync error: "+e.message});
     }
     setSyncing(false);
   }
