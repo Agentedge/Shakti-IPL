@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
-import { VENUES_BASE, PLAYERS_BASE, BOWLERS_BASE, SQUADS, MATCHES } from "./shakti_db.js";
-import { H2H, TOSS_INTEL, PP_BOWLERS, IMPACT_PLAYERS } from "./shakti_extra.js";
+import { VENUES_BASE, PLAYERS_BASE, BOWLERS_BASE, SQUADS, MATCHES, getH2H, getVenueTossData, getMatchupSR, getTeamPPBowlers } from "./shakti_db.js";
 import { syncLastMatch, applyFormToPlayer, applyFormToBowler } from "./cricket_sync.js";
 import { findMatchId, fetchTossAndPlaying11, fetchLiveScorecard, getRemainingBattingStrength, getRemainingBowlingStrength, BATTING_ORDERS, BOWLING_ROTATION } from "./playing11_engine.js";
 
@@ -48,13 +47,14 @@ function getTeamPPSR(tc){
   const srs=op.map(p=>PLAYERS_BASE[p]?.ppSR||120);
   return srs[0]*0.40+(srs[1]||srs[0])*0.35+(srs[2]||srs[0])*0.25;
 }
+
+// Uses real PP bowler data from shakti_db.js (sourced from shakti_data.json)
 function getTeamPPEconFull(tc){
-  const bwls=PP_BOWLERS[tc]||[];
-  if(!bwls.length)return 8.5;
-  const ec=bwls.map(b=>b.e);
-  return ec[0]*0.45+(ec[1]||ec[0])*0.35+(ec[2]||ec[0])*0.20;
+  const bwls = getTeamPPBowlers(tc);
+  if(!bwls.length) return 8.5;
+  const ec = bwls.map(b => b.ppEcon);
+  return ec[0]*0.45 + (ec[1]||ec[0])*0.35 + (ec[2]||ec[0])*0.20;
 }
-function getH2H(t1,t2){return H2H[t1+"-"+t2]||{total:10,t1wins:5,last5:[1,0,1,0,1],venueEdge:{}};}
 
 // ── Implied probability from platform odds ─────────────────────
 function impliedProb(favOdds,undOdds,role){
@@ -71,15 +71,13 @@ function impliedProb(favOdds,undOdds,role){
 function calcEV(realProbPct,impliedProbPct,stake){
   const rp=realProbPct/100;
   const ip=impliedProbPct/100;
-  const odds=(1/ip)-1; // decimal odds minus 1
+  const odds=(1/ip)-1;
   return Math.round((rp*odds-(1-rp))*stake);
 }
 
 // ── Phase Probability Model ────────────────────────────────────
 function phaseProbDist(predicted,variance){
-  // Normal distribution approximation
-  // P(X > threshold) = 1 - Φ((threshold - mean) / sd)
-  const sd=variance*0.6; // variance is half-range, sd is 60% of that
+  const sd=variance*0.6;
   function phi(x){
     const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
     const sign=x<0?-1:1; const absX=Math.abs(x);
@@ -109,11 +107,11 @@ function calcPreMatchWinProb(t1,t2,venue,toss){
   prob-=bowlEdge;
   if(battingFirst===t1)prob+=(0.50-vChase)*0.18;
   else prob+=(vChase-0.50)*0.18;
-  // H2H adjustment
-  const h=getH2H(t1,t2);
-  if(h.total>=10){const h2hEdge=(h.t1wins/h.total-0.5)*0.12;prob+=h2hEdge;}
-  // Recent form (last 5)
-  const recentT1=h.last5.reduce((s,v)=>s+v,0)/5;
+  // Real H2H from shakti_data.json via shakti_db.js
+  const h=getH2H(t1,t2,venue);
+  if(h.matches>=10){const h2hEdge=(h.t1WinPct/100-0.5)*0.12;prob+=h2hEdge;}
+  // Recent form proxy from H2H last5
+  const recentT1=(h.last5||[1,0,1,0,1]).reduce((s,v)=>s+v,0)/5;
   prob+=(recentT1-0.5)*0.06;
   // Hot players
   const t1Hot=(SQUADS[t1]||[]).filter(p=>{const pl=PLAYERS_BASE[p];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.12;}).length;
@@ -149,7 +147,11 @@ function calcLiveWinProb(score,wickets,overs,target,venue,battingTeam,chasingTea
 // ── Real Intel Score ───────────────────────────────────────────
 function realIntelScore(match,toss,v2026){
   const v=VENUES_BASE[match.venue]||{};
-  const ti=TOSS_INTEL[match.venue]||{bat:50,field:50,note:"No toss data"};
+  // Real toss data from shakti_data.json
+  const rawToss = getVenueTossData(match.venue);
+  const ti = rawToss
+    ? { bat: rawToss.batFirstWin, field: rawToss.fieldFirstWin, note: `${rawToss.matches} matches (Cricsheet 2008-2025)` }
+    : { bat: 50, field: 50, note: "No historical toss data for this venue" };
   let score=0;const details=[];
   const battingTeam=toss==="batting"?match.t1:match.t2;
   const bowlingTeam=battingTeam===match.t1?match.t2:match.t1;
@@ -164,9 +166,10 @@ function realIntelScore(match,toss,v2026){
   const tossFav=toss==="batting"?ti.bat:ti.field;
   const te=Math.max(2,Math.min(20,Math.round((tossFav-50)/2+10)));score+=te;
   details.push({l:"Toss Edge",v:te,max:20,note:ti.note});
-  const h=getH2H(match.t1,match.t2);
-  const h2hScore=Math.max(2,Math.min(14,Math.round(7+(h.t1wins/h.total-0.5)*14)));score+=h2hScore;
-  details.push({l:"H2H Record",v:h2hScore,max:14,note:`${match.t1} ${h.t1wins}-${h.total-h.t1wins} ${match.t2} (all time)`});
+  // Real H2H from shakti_data.json
+  const h=getH2H(match.t1,match.t2,match.venue);
+  const h2hScore=Math.max(2,Math.min(14,Math.round(7+(h.t1WinPct/100-0.5)*14)));score+=h2hScore;
+  details.push({l:"H2H Record",v:h2hScore,max:14,note:`${match.t1} ${Math.round(h.t1WinPct/100*h.matches)}-${h.matches-Math.round(h.t1WinPct/100*h.matches)} ${match.t2} (${h.matches} matches at venue)`});
   const hotPlayers=(SQUADS[battingTeam]||[]).filter(p=>{const pl=PLAYERS_BASE[p];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.10;});
   const hf=Math.min(12,hotPlayers.length*4);score+=hf;
   details.push({l:"In-Form Players",v:hf,max:12,note:hotPlayers.length>0?`${hotPlayers.slice(0,2).join(", ")} in WC form`:"No notable hot streaks"});
@@ -187,6 +190,7 @@ function calibratedVenue(vn,v2026){
   const w=Math.min(0.7,cal.matches*0.14);
   return{...base,pp:Math.round(base.pp*(1-w)+cal.avgPP*w),total:Math.round(base.total*(1-w)+cal.avgTotal*w)};
 }
+
 function predict(cfg){
   const{venueName,battingTeam,bowlingTeam,striker,nonStriker,bowler,pitchType,weather,toss,lS,lW,lO,v2026,is2nd,target,impactPlayerAdded,strikerData,nonStrikerData,bowlerData,biasLog,remainingBat,remainingBowl}=cfg;
   const v=calibratedVenue(venueName,v2026||{});
@@ -194,12 +198,15 @@ function predict(cfg){
   const p2=nonStrikerData||PLAYERS_BASE[nonStriker]||PLAYERS_BASE["Other Batsman"];
   const teamPPSR=battingTeam?getTeamPPSR(battingTeam):(p1.ppSR+p2.ppSR)/2;
   const teamPPEcon=bowlingTeam?getTeamPPEconFull(bowlingTeam):(BOWLERS_BASE[bowler]?.ppEcon||8.5);
-  const blendedPPSR=p1.ppSR*0.35+p2.ppSR*0.25+teamPPSR*0.40;
+  // Real batter-vs-bowler matchup lookup (requires 20+ balls)
+  const matchupSR = getMatchupSR(striker, bowler);
+  const blendedPPSR = matchupSR
+    ? matchupSR*0.40 + p1.ppSR*0.35 + p2.ppSR*0.25   // 40% matchup, 60% base
+    : p1.ppSR*0.35 + p2.ppSR*0.25 + teamPPSR*0.40;    // original formula (no matchup data)
   const blendedEcon=(BOWLERS_BASE[bowler]?.ppEcon||teamPPEcon)*0.55+teamPPEcon*0.45;
-  // Impact player adjustment
-  const ipBonus=impactPlayerAdded?(IMPACT_PLAYERS[battingTeam]?.find(ip=>ip.n===impactPlayerAdded)?.runsAdded||0)*0.4:0;
+  // Impact player: structural ~6% PP boost (no fabricated run numbers)
+  const ipBonus = impactPlayerAdded ? v.pp * 0.06 : 0;
   const avgPPAgg=blendedPPSR/150;
-  // Blend current batsmen with remaining lineup for mid/death projection
   const remMidSR=remainingBat?.avgMidSR||((p1.midSR||130)+(p2.midSR||130))/2;
   const remDeathSR=remainingBat?.avgDeathSR||((p1.deathSR||155)+(p2.deathSR||155))/2;
   const avgMidAgg=(lO<6?(p1.midSR||130)*0.4+(p2.midSR||130)*0.3+remMidSR*0.3:remMidSR)/135;
@@ -233,7 +240,6 @@ function predict(cfg){
   const rpo2=lO>0?lS/lO:pp/6;
   const opf=lO<6?avgPPAgg:lO<15?avgMidAgg:avgDeathAgg;
   const nxt=Math.max(3,Math.round(rpo2*opf*pf*wp));
-  // Chase
   let chaseProj=null;
   if(is2nd&&target>0){
     const needed=target-(lS||0);
@@ -243,11 +249,11 @@ function predict(cfg){
     const projRR=teamSR/100*6;
     chaseProj={needed,reqRR:reqRR.toFixed(1),projRR:projRR.toFixed(1),feasible:projRR>=reqRR*0.85};
   }
-  // Phase probability distribution
   const ppDist=phaseProbDist(pp,pm*2);
   const totDist=phaseProbDist(tot,tm*2);
-  return{pp,ppLo:pp-pm,ppHi:pp+pm,at10,at10Lo:at10-om,at10Hi:at10+om,at12,at12Lo:at12-om2,at12Hi:at12+om2,at15,at15Lo:at15-om3,at15Hi:at15+om3,tot,totLo:tot-tm,totHi:tot+tm,nxt,nxtLo:nxt-2,nxtHi:nxt+3,chaseWin:v.chase,isLive:lO>0,ppDist,totDist,chaseProj,ipBonus};
+  return{pp,ppLo:pp-pm,ppHi:pp+pm,at10,at10Lo:at10-om,at10Hi:at10+om,at12,at12Lo:at12-om2,at12Hi:at12+om2,at15,at15Lo:at15-om3,at15Hi:at15+om3,tot,totLo:tot-tm,totHi:tot+tm,nxt,nxtLo:nxt-2,nxtHi:nxt+3,chaseWin:v.chase,isLive:lO>0,ppDist,totDist,chaseProj,ipBonus,matchupUsed:!!matchupSR};
 }
+
 function getBV(id,pred){
   if(!pred)return{val:0,lo:0,hi:0};
   if(id==="pp")return{val:pred.pp,lo:pred.ppLo,hi:pred.ppHi};
@@ -258,6 +264,7 @@ function getBV(id,pred){
   if(id==="over")return{val:pred.nxt,lo:pred.nxtLo,hi:pred.nxtHi};
   return{val:pred.pp,lo:pred.ppLo,hi:pred.ppHi};
 }
+
 function verdict(val,line){
   if(!line||line==="")return null;
   const l=parseFloat(line);if(isNaN(l)||l<=0)return null;
@@ -287,11 +294,11 @@ async function fetchLiveClaude(t1,t2,onStatus){
   const blocks=d.content||[];
   const textBlocks=blocks.filter(b=>b.type==="text");
   const rawText=textBlocks.map(b=>b.text).join("").trim();
-  // Try to extract JSON from the response
   const jsonMatch=rawText.match(/\{[\s\S]*\}/);
   if(!jsonMatch)throw new Error("No JSON in response. Got: "+rawText.slice(0,100));
   return JSON.parse(jsonMatch[0]);
 }
+
 async function claudeAsk(msg,ctx){
   try{
     const r=await fetch("/api/proxy",{
@@ -320,7 +327,6 @@ function computeAccuracy(accLog){
   const ppAcc=pct("pp"),totAcc=pct("total"),winAcc=pct("winner");
   const valid=[ppAcc,totAcc,winAcc].filter(v=>v!==null);
   const overall=valid.length>0?Math.round(valid.reduce((a,b)=>a+b,0)/valid.length):Math.min(77,68+Math.floor(accLog.length/5));
-  // Pattern detection
   const patterns=[];
   if(byMarket.pp?.total>=5){
     const ppPct=byMarket.pp.hits/byMarket.pp.total*100;
@@ -343,7 +349,6 @@ function seasonProjection(br,wr,bets,stage){
   const wrFrac=(wr||50)/100;
   const avgBetPerMatch=bets.length/Math.max(1,matchesPlayed);
   const avgStake=bets.filter(b=>b.out!=="PENDING").reduce((s,b)=>s+b.stake,0)/Math.max(1,bets.filter(b=>b.out!=="PENDING").length);
-  // Simple projection: avg P&L per match × remaining matches
   const resolvedBets=bets.filter(b=>b.out!=="PENDING");
   const netPerMatch=resolvedBets.reduce((s,b)=>s+(b.out==="WIN"?b.stake:-b.stake),0)/Math.max(1,matchesPlayed);
   const projectedFinal=Math.round(br+netPerMatch*matchesLeft);
@@ -427,7 +432,7 @@ export default function Shakti(){
   const [v2026,setV2026]=useState({});
   const [accLog,setAccLog]=useState([]);
   const [logged,setLogged]=useState(0);
-  const [playerForm,setPlayerForm]=useState({}); // {name:[{runs,balls,date}]}
+  const [playerForm,setPlayerForm]=useState({});
   const [bowlerForm,setBowlerForm]=useState({});
   const [biasLog,setBiasLog]=useState({});
   const [predictionLog,setPredictionLog]=useState([]);
@@ -482,7 +487,7 @@ export default function Shakti(){
   const [lActualWinner,setLActualWinner]=useState("");const [lPredWinner,setLPredWinner]=useState("");
 
   // Chat
-  const [chatMsgs,setChatMsgs]=useState([{role:"assistant",content:"⚔ SHAKTI v9 — Full intelligence active. Win probability, EV calculator, H2H records, toss intelligence, phase probability model, player form, season projection. Ask anything.",ts:Date.now()}]);
+  const [chatMsgs,setChatMsgs]=useState([{role:"assistant",content:"⚔ SHAKTI v9 — Full intelligence active. Real Cricsheet H2H data, real toss win rates, batter-vs-bowler matchups. Win probability, EV calculator, phase probability model, player form, season projection. Ask anything.",ts:Date.now()}]);
   const [chatIn,setChatIn]=useState("");const [chatBusy,setChatBusy]=useState(false);
   const chatEnd=useRef(null);const timerRef=useRef(null);
 
@@ -504,7 +509,7 @@ export default function Shakti(){
   // ── Save to localStorage ────────────────────────────────────
   useEffect(()=>{
     saveState({br,base,peakBr,stage,cLoss,dLoss,bets,skipNext,v2026,accLog,logged,playerForm,bowlerForm,biasLog,predictionLog,playing11});
-  },[br,base,peakBr,stage,cLoss,dLoss,bets,skipNext,v2026,accLog,logged,playerForm]);
+  },[br,base,peakBr,stage,cLoss,dLoss,bets,skipNext,v2026,accLog,logged,playerForm,bowlerForm,biasLog,predictionLog,playing11]);
 
   // ── Derived ─────────────────────────────────────────────────
   const ks=br<4000,tilt=cLoss>=2,stop=dLoss>=2;
@@ -521,34 +526,33 @@ export default function Shakti(){
   const lO=liveData?.isLive?liveData.overs:0;
   const bTeam=battingFirst||(match?(toss==="batting"?match.t1:match.t2):"");
   const blTeam=bTeam&&match?(bTeam===match.t1?match.t2:match.t1):"";
-  // Apply form multipliers to current players
+
   let strikerData=PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"];
   let nonStrikerData=PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"];
   let bowlerData=BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"];
   try{strikerData=applyFormToPlayer(striker,PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"],playerForm,biasLog,match?.venue);}catch(e){}
   try{nonStrikerData=applyFormToPlayer(nonStrike,PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"],playerForm,biasLog,match?.venue);}catch(e){}
   try{bowlerData=applyFormToBowler(bowler,BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"],bowlerForm);}catch(e){}
-  // Remaining batting and bowling strength
+
   let remainingBat={avgMidSR:130,avgDeathSR:155,yetToBat:[],hasFinisher:false};
   let remainingBowl={avgDeathEcon:9.5,remainingBowlers:[]};
   try{if(match&&bTeam)remainingBat=getRemainingBattingStrength(bTeam,battedPlayers,[striker,nonStrike],playing11[bTeam]||[],PLAYERS_BASE);}catch(e){}
   try{if(match&&blTeam)remainingBowl=getRemainingBowlingStrength(blTeam,bowlerSpells,lO,BOWLERS_BASE);}catch(e){}
+
   let pred=null;
   try{if(match)pred=predict({venueName:match.venue,battingTeam:bTeam,bowlingTeam:blTeam,striker,nonStriker:nonStrike,bowler,pitchType:pitch,weather:wx,toss,lS:is2nd?0:lS,lW:is2nd?0:lW,lO:is2nd?0:lO,v2026,is2nd,target,impactPlayerAdded:impactPlayer,strikerData,nonStrikerData,bowlerData,biasLog,remainingBat,remainingBowl});}catch(e){pred=null;}
+
   let winProb=50;
   try{if(match)winProb=liveData?.isLive?calcLiveWinProb(lS,lW,lO,is2nd?target:liveData?.target||0,match.venue,bTeam,blTeam,is2nd):calcPreMatchWinProb(match.t1,match.t2,match.venue,toss);}catch(e){winProb=50;}
 
-  // Active match bets for correlation
   const activeBetMarkets=match?bets.filter(b=>b.match===match.t1+" vs "+match.t2&&b.out==="PENDING").map(b=>b.marketId):[];
   const portCorr=portfolioCorrelation(activeBetMarkets);
 
-  // Odds gap calculation
   const ogImplied=impliedProb(ogFavOdds,ogUndOdds,ogRole);
   const ogReal=ogRole==="fav"?winProb:100-winProb;
   const ogGap=ogReal-ogImplied;
   const ogEV=calcEV(ogReal,ogImplied,ogStake);
 
-  // Dynamic stake
   const raw=rawStake(br,stage,base,ks)*(recovery?.stakeAdj||1);
   const nextMS=MILESTONES.find(m=>m>br)||TARGET;
   const proj=seasonProjection(br,wr,bets,stage);
@@ -564,7 +568,6 @@ export default function Shakti(){
     setFetchStatus("Connecting...");
     try{
       let d=null;
-      // Try Claude web search
       d=await fetchLiveClaude(match.t1,match.t2,(s)=>setFetchStatus(s));
       if(d){
         setLiveData({...d,innings:d.innings||[]});
@@ -635,10 +638,28 @@ export default function Shakti(){
     setLPP("");setLTotal("");setLPredPP("");setLActualWinner("");setLPredWinner("");
   }
 
+  // ── Place Bet with prediction snapshot ────────────────────────
   function placeBet(bt,stakeAmt){
     if(tilt||stop||skipNext)return;
     const corr=portfolioCorrelation([...activeBetMarkets,bt.id]);
     if(corr>75){if(!window.confirm(`⚠ Portfolio correlation ${corr}% — very correlated bets. Continue?`))return;}
+
+    // Save prediction snapshot at bet time for bias detection
+    if(pred&&match){
+      const snapshot={
+        matchId:match.id,
+        market:bt.id,
+        over:lO,
+        score:lS,
+        wickets:lW,
+        shaktPrediction:getBV(bt.id,pred).val,
+        platformLine:parseFloat(lines[bt.id]||0),
+        yourCall:getBV(bt.id,pred).val>parseFloat(lines[bt.id]||0)?"OVER":"UNDER",
+        timestamp:Date.now(),
+      };
+      setPredictionLog(p=>[...p,snapshot]);
+    }
+
     setBets(p=>[...p,{id:Date.now(),match:match.t1+" vs "+match.t2,marketId:bt.id,market:bt.label,tier:bt.tier,stake:stakeAmt,stage,out:"PENDING",ts:Date.now()}]);
   }
 
@@ -667,51 +688,32 @@ export default function Shakti(){
     setSyncing(true);
     setLastSync(null);
     try{
-      // Call server-side sync endpoint
       const r = await fetch("/api/sync");
       const result = await r.json();
-
       if(!result.success){
         setLastSync({success:false, msg:result.msg});
         setSyncing(false);
         return;
       }
-
       const updates = {playersUpdated:[], bowlersUpdated:[], venueUpdated:null, biasDetected:[]};
-
-      // Update venue calibration
       if(result.venueMapped && result.ppRuns && result.totalRuns){
         const vn = result.venueMapped;
         setV2026(prev=>{
           const e=prev[vn]||{matches:0,avgPP:result.ppRuns,avgTotal:result.totalRuns};
           const n=e.matches+1;
-          return{...prev,[vn]:{
-            matches:n,
-            avgPP:Math.round((e.avgPP*(n-1)+result.ppRuns)/n),
-            avgTotal:Math.round((e.avgTotal*(n-1)+result.totalRuns)/n)
-          }};
+          return{...prev,[vn]:{matches:n,avgPP:Math.round((e.avgPP*(n-1)+result.ppRuns)/n),avgTotal:Math.round((e.avgTotal*(n-1)+result.totalRuns)/n)}};
         });
-        updates.venueUpdated = {
-          venue:vn,
-          newAvgPP:result.ppRuns,
-          newAvgTotal:result.totalRuns,
-          matches:1
-        };
+        updates.venueUpdated = {venue:vn,newAvgPP:result.ppRuns,newAvgTotal:result.totalRuns,matches:1};
       }
-
-      // Update player form from batting data
       const newPlayerForm = {...playerForm};
       const newBowlerForm = {...bowlerForm};
-
       result.innings.forEach(inn=>{
-        // Batting form
         (inn.batting||[]).forEach(b=>{
           if(!b.name||b.balls<4) return;
           const player = PLAYERS_BASE[b.name];
           if(!player) return;
           if(!newPlayerForm[b.name]) newPlayerForm[b.name]=[];
           newPlayerForm[b.name]=[...newPlayerForm[b.name],{runs:b.runs,balls:b.balls,sr:b.sr,date:result.date}].slice(-5);
-          // Calculate form multiplier
           const recent = newPlayerForm[b.name];
           const weights = [0.40,0.30,0.15,0.10,0.05];
           const wSR = recent.reduce((s,x,i)=>s+(x.sr||100)*(weights[recent.length-1-i]||0.05),0);
@@ -719,50 +721,29 @@ export default function Shakti(){
           const avgSR = wSR/wTotal;
           const mult = Math.round(Math.max(0.75,Math.min(1.25,avgSR/Math.max(1,player.ppSR)))*100)/100;
           if(Math.abs(mult-1.0)>0.03){
-            updates.playersUpdated.push({
-              name:b.name,
-              runs:b.runs,
-              sr:b.sr,
-              formMult:mult,
-              trend:mult>1.08?"🔥 HOT":mult<0.92?"❄️ COLD":"→ NEUTRAL"
-            });
+            updates.playersUpdated.push({name:b.name,runs:b.runs,sr:b.sr,formMult:mult,trend:mult>1.08?"🔥 HOT":mult<0.92?"❄️ COLD":"→ NEUTRAL"});
           }
         });
-
-        // Bowling form
         (inn.bowling||[]).forEach(b=>{
           if(!b.name||b.overs<1) return;
-          const bowler = BOWLERS_BASE[b.name];
-          if(!bowler) return;
+          const bowlerB = BOWLERS_BASE[b.name];
+          if(!bowlerB) return;
           if(!newBowlerForm[b.name]) newBowlerForm[b.name]=[];
           newBowlerForm[b.name]=[...newBowlerForm[b.name],{overs:b.overs,runs:b.runs,wickets:b.wickets,econ:b.econ,date:result.date}].slice(-5);
           const recent = newBowlerForm[b.name];
           const weights = [0.40,0.30,0.15,0.10,0.05];
-          const wE = recent.reduce((s,x,i)=>s+(x.econ||bowler.ppEcon)*(weights[recent.length-1-i]||0.05),0);
+          const wE = recent.reduce((s,x,i)=>s+(x.econ||bowlerB.ppEcon)*(weights[recent.length-1-i]||0.05),0);
           const wTotal = recent.reduce((s,x,i)=>s+(weights[recent.length-1-i]||0.05),0);
           const avgEcon = Math.round(wE/wTotal*100)/100;
-          const mult = Math.round(Math.max(0.80,Math.min(1.20,avgEcon/Math.max(1,bowler.ppEcon)))*100)/100;
+          const mult = Math.round(Math.max(0.80,Math.min(1.20,avgEcon/Math.max(1,bowlerB.ppEcon)))*100)/100;
           if(Math.abs(mult-1.0)>0.03){
-            updates.bowlersUpdated.push({
-              name:b.name,
-              econ:b.econ,
-              formMult:mult,
-              trend:mult<0.92?"🔥 SHARP":mult>1.08?"❄️ OFF FORM":"→ NORMAL"
-            });
+            updates.bowlersUpdated.push({name:b.name,econ:b.econ,formMult:mult,trend:mult<0.92?"🔥 SHARP":mult>1.08?"❄️ OFF FORM":"→ NORMAL"});
           }
         });
       });
-
       setPlayerForm(newPlayerForm);
       setBowlerForm(newBowlerForm);
-
-      setLastSync({
-        success:true,
-        matchName:result.matchName,
-        date:result.date,
-        updates
-      });
-
+      setLastSync({success:true,matchName:result.matchName,date:result.date,updates});
     }catch(e){
       setLastSync({success:false, msg:"Sync error: "+e.message});
     }
@@ -773,7 +754,6 @@ export default function Shakti(){
     if(!match)return;
     setFetchingToss(true);
     try{
-      // Find match ID
       let id=matchId;
       if(!id){
         id=await findMatchId(match.t1,match.t2);
@@ -783,28 +763,23 @@ export default function Shakti(){
         setTossData({error:"Match not found in CricketData yet. Try closer to match time."});
         setFetchingToss(false);return;
       }
-      // Fetch toss + playing 11
       const data=await fetchTossAndPlaying11(id);
       if(!data){setTossData({error:"Could not fetch match info"});setFetchingToss(false);return;}
       setTossData(data);
-      // Auto-set playing 11
       if(data.teams&&Object.keys(data.teams).length>0){
         setPlaying11(data.teams);
       }
-      // Auto-set toss
       if(data.tossWinner&&data.tossChoice){
         const battingTeamCode=data.tossChoice==="bat"?
           (data.tossWinner.includes(match.t1)?match.t1:match.t2):
           (data.tossWinner.includes(match.t1)?match.t2:match.t1);
         setBattingFirst(battingTeamCode);
         setToss(battingTeamCode===match.t1?"batting":"chasing");
-        // Auto-set openers
         const order=BATTING_ORDERS[battingTeamCode]||[];
         const p11=data.teams[battingTeamCode]||[];
         const confirmedOpeners=order.filter(p=>p11.length===0||p11.some(p11p=>p11p.includes(p.split(" ").slice(-1)[0])));
         if(confirmedOpeners[0])setStriker(confirmedOpeners[0]);
         if(confirmedOpeners[1])setNonStrike(confirmedOpeners[1]);
-        // Auto-set PP bowler
         const bowlingTeam=battingTeamCode===match.t1?match.t2:match.t1;
         const ppBowlers=BOWLING_ROTATION[bowlingTeam]?.pp||[];
         if(ppBowlers[0])setBowler(ppBowlers[0]);
@@ -896,7 +871,6 @@ export default function Shakti(){
         {/* ══ HOME ════════════════════════════════════════════ */}
         {tab==="home"&&(
           <div>
-            {/* Session strip */}
             <div style={{display:"flex",gap:8,marginBottom:12}}>
               {[{l:"TODAY BETS",v:todayBets.length,c:C.crimson},{l:"TODAY P&L",v:(todayPnL>=0?"+":"")+"₹"+Math.abs(todayPnL).toLocaleString("en-IN"),c:todayPnL>=0?C.greenL:C.red},{l:"WIN RATE",v:wr!==null?wr+"%":"—",c:wr>=65?C.greenL:wr>=55?C.gold:C.red}].map(({l,v,c})=>(
                 <div key={l} style={{...card({flex:1,padding:"9px 8px",textAlign:"center"})}}>
@@ -906,7 +880,6 @@ export default function Shakti(){
               ))}
             </div>
 
-            {/* Stage + stakes */}
             <div style={{...card({marginBottom:12,padding:14})}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><span style={{fontSize:9,color:C.dim,letterSpacing:3,fontWeight:"bold"}}>STAGE PROGRESS</span><span style={{fontSize:9,color:tilt?"#ef4444":stop?"#ef4444":skipNext?"#f97316":recovery?.active?C.gold:C.greenL,fontWeight:"bold"}}>{skipNext?"SKIP":tilt?"TILT":stop?"STOPPED":recovery?.active?"RECOVERY":"READY"}</span></div>
               <div style={{display:"flex",gap:6,marginBottom:10}}>
@@ -922,7 +895,6 @@ export default function Shakti(){
               </div>
             </div>
 
-            {/* Target progress */}
             <div style={{...card({marginBottom:12,padding:14})}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}><span style={{fontSize:9,color:C.dim,letterSpacing:3,fontWeight:"bold"}}>TARGET ₹3,00,000</span><span style={{fontSize:9,color:C.crimson,fontWeight:"bold"}}>{Math.round(br/TARGET*100)}%</span></div>
               <div style={{height:8,background:C.border,borderRadius:4,marginBottom:8,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,br/TARGET*100)+"%",background:"linear-gradient(90deg,"+C.crimson+","+C.goldL+")",borderRadius:4,transition:"width 0.5s"}}/></div>
@@ -932,10 +904,8 @@ export default function Shakti(){
               {proj&&<div style={{padding:"8px 10px",background:C.bg,borderRadius:8,border:"1px solid "+C.border}}><div style={{fontSize:8,color:C.dim,marginBottom:2}}>SEASON PROJECTION</div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontSize:14,fontWeight:"bold",color:proj.projectedFinal>=TARGET?C.greenL:C.gold}}>₹{proj.projectedFinal.toLocaleString("en-IN")}</div><div style={{fontSize:9,color:C.muted}}>Range: ₹{(proj.low/1000).toFixed(0)}k–₹{(proj.high/1000).toFixed(0)}k</div><div style={{fontSize:8,color:C.dim}}>{proj.matchesLeft} matches left</div></div></div>}
             </div>
 
-            {/* Chart */}
             {chartData.length>1&&<div style={{...card({marginBottom:12,padding:14})}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}><span style={{fontSize:9,color:C.dim,letterSpacing:3,fontWeight:"bold"}}>BANKROLL GROWTH</span><span style={{fontSize:10,color:pl>=0?C.greenL:C.red,fontWeight:"bold"}}>{pl>=0?"+":""}₹{Math.abs(pl).toLocaleString("en-IN")}</span></div><ResponsiveContainer width="100%" height={100}><AreaChart data={chartData}><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={C.crimson} stopOpacity={0.2}/><stop offset="95%" stopColor={C.crimson} stopOpacity={0}/></linearGradient></defs><XAxis dataKey="n" tick={{fill:C.dim,fontSize:8}} axisLine={false} tickLine={false}/><YAxis tick={{fill:C.dim,fontSize:8}} axisLine={false} tickLine={false} width={44} tickFormatter={v=>"₹"+(v/1000).toFixed(0)+"k"}/><Tooltip contentStyle={{background:C.panel,border:"1px solid "+C.border,borderRadius:6,fontSize:10}} formatter={v=>["₹"+Number(v).toLocaleString("en-IN")]} labelFormatter={l=>"Bet #"+l}/><ReferenceLine y={INIT_BR} stroke={C.border} strokeDasharray="3 3"/><Area type="monotone" dataKey="v" stroke={C.crimson} fill="url(#bg)" strokeWidth={2} dot={false}/></AreaChart></ResponsiveContainer></div>}
 
-            {/* Accuracy */}
             <div style={{...card({marginBottom:12,padding:14})}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><span style={{fontSize:9,color:C.dim,letterSpacing:3,fontWeight:"bold"}}>ENGINE ACCURACY</span><span style={{fontSize:9,color:C.muted}}>{accLog.length} predictions</span></div>
               <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:8}}>
@@ -977,21 +947,19 @@ export default function Shakti(){
                 </div>
                 <div style={{fontSize:9,color:C.dim,marginBottom:8}}>📍 {match.venue} · {match.time}</div>
                 <div style={{display:"flex",gap:5}}>
-                  {[["PP",(calibratedVenue(match.venue,v2026)).pp],["10ov",(calibratedVenue(match.venue,v2026)).ov10],["15ov",(calibratedVenue(match.venue,v2026)).ov15],["TOT",(calibratedVenue(match.venue,v2026)).total],["CHS",((VENUES_BASE[match.venue]||{}).chase||50)+"%"]].map(([l,v])=>(
+                  {[["PP",(calibratedVenue(match.venue,v2026)).pp],["10ov",(calibratedVenue(match.venue,v2026)).ov10||"—"],["15ov",(calibratedVenue(match.venue,v2026)).ov15||"—"],["TOT",(calibratedVenue(match.venue,v2026)).total],["CHS",((VENUES_BASE[match.venue]||{}).chase||50)+"%"]].map(([l,v])=>(
                     <div key={l} style={{flex:1,background:C.bg,borderRadius:6,padding:"5px 3px",textAlign:"center",border:"1px solid "+C.border}}><div style={{fontSize:7,color:C.dim,marginBottom:1}}>{l}</div><div style={{fontSize:11,color:C.crimson,fontWeight:"bold"}}>{v}</div></div>
                   ))}
                 </div>
               </div>
             </div>
 
-            {/* Innings toggle */}
             <div style={{display:"flex",gap:6,marginBottom:10}}>
               <button onClick={()=>setIs2nd(false)} style={{...tbtn(!is2nd),flex:1,fontSize:10}}>1st INN — Predict</button>
               <button onClick={()=>setIs2nd(true)} style={{...tbtn(is2nd,C.gold),flex:1,fontSize:10}}>2nd INN — Chase</button>
             </div>
             {is2nd&&<div style={{...card({marginBottom:10,padding:12,background:"#fffbeb",border:"1px solid "+C.goldL})}}><div style={{fontSize:9,color:C.gold,letterSpacing:3,marginBottom:8,fontWeight:"bold"}}>CHASE MODE</div><div style={{display:"flex",gap:8,alignItems:"center"}}><input type="number" value={target||""} onChange={e=>setTarget(+e.target.value)} placeholder="Target..." style={{...sel,fontSize:20,fontWeight:"bold",textAlign:"center",color:C.crimson}}/>{target>0&&pred?.chaseProj&&<div style={{textAlign:"center",minWidth:80}}><div style={{fontSize:8,color:C.dim,marginBottom:2}}>REQ RR</div><div style={{fontSize:16,fontWeight:"bold",color:pred.chaseProj.feasible?C.greenL:C.red}}>{pred.chaseProj.reqRR}</div><div style={{fontSize:8,color:C.dim}}>PROJ {pred.chaseProj.projRR}</div></div>}</div></div>}
 
-            {/* Sub tabs */}
             <div style={{display:"flex",gap:6,marginBottom:10,overflowX:"auto",scrollbarWidth:"none"}}>
               {[["predict","📊 Predict"],["odds","🎯 Odds Gap"],["phase","📈 Phase"],["bowlers","🎳 Bowlers"],["live","📡 Live"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setSub(id)} style={{...tbtn(sub===id),flexShrink:0,padding:"7px 12px",fontSize:10}}>{label}</button>
@@ -1003,7 +971,6 @@ export default function Shakti(){
               <div>
                 {liveData?.isLive&&(
                   <div style={{...card({marginBottom:10,padding:0,overflow:"hidden",border:"1.5px solid "+C.crimsonL})}}>
-                    {/* Score header */}
                     <div style={{background:C.crimson+"08",padding:"10px 12px",borderBottom:"1px solid "+C.border}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                         <div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -1041,7 +1008,6 @@ export default function Shakti(){
                           {["R","B","SR"].map(h=><span key={h} style={{fontSize:7,color:C.dim,fontWeight:"bold",width:32,textAlign:"right"}}>{h}</span>)}
                         </div>
                       </div>
-                      {/* Current batsmen */}
                       {[{name:striker,isStriker:true},{name:nonStrike,isStriker:false}].filter(x=>x.name&&x.name!=="Other Batsman").map(({name,isStriker})=>{
                         const safeInns=Array.isArray(liveData?.innings)?liveData.innings:[];
                         const curInn=safeInns.find(i=>parseFloat(i.overs||0)>0&&parseFloat(i.overs||0)<20)||safeInns[safeInns.length-1]||null;
@@ -1062,7 +1028,6 @@ export default function Shakti(){
                           </div>
                         );
                       })}
-                      {/* Already dismissed */}
                       {(()=>{
                         const safeInns=Array.isArray(liveData?.innings)?liveData.innings:[];
                         const curInn=safeInns.find(i=>parseFloat(i.overs||0)>0&&parseFloat(i.overs||0)<20)||safeInns[safeInns.length-1]||null;
@@ -1126,9 +1091,18 @@ export default function Shakti(){
                   <div><div style={{fontSize:8,color:C.dim,marginBottom:3,fontWeight:"bold"}}>WEATHER</div><select value={wx} onChange={e=>setWx(e.target.value)} style={sel}><option value="clear">Clear</option><option value="dew">Dew</option><option value="overcast">Overcast</option><option value="humid">Humid</option></select></div>
                 </div>
 
-                {/* Impact player */}
-                <div style={{marginBottom:10}}><div style={{fontSize:8,color:C.dim,marginBottom:3,fontWeight:"bold"}}>IMPACT PLAYER (if announced)</div><select value={impactPlayer} onChange={e=>setImpactPlayer(e.target.value)} style={sel}><option value="">None announced</option>{(IMPACT_PLAYERS[bTeam||match.t1]||[]).map(ip=><option key={ip.n} value={ip.n}>{ip.n} (+{ip.runsAdded} runs est)</option>)}</select></div>
-                {impactPlayer&&pred?.ipBonus>0&&<div style={{marginBottom:10,padding:"8px 10px",background:C.gold+"10",borderRadius:8,border:"1px solid "+C.goldL}}><div style={{fontSize:9,color:C.gold,fontWeight:"bold"}}>⚡ IMPACT: +{Math.round(pred.ipBonus)} runs added to projection</div></div>}
+                {/* Impact player — from SQUADS, no fabricated run numbers */}
+                <div style={{marginBottom:10}}>
+                  <div style={{fontSize:8,color:C.dim,marginBottom:3,fontWeight:"bold"}}>IMPACT PLAYER (if announced)</div>
+                  <select value={impactPlayer} onChange={e=>setImpactPlayer(e.target.value)} style={sel}>
+                    <option value="">None announced</option>
+                    {(SQUADS[bTeam||match.t1]||[]).map(p=><option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+                {impactPlayer&&pred?.ipBonus>0&&<div style={{marginBottom:10,padding:"8px 10px",background:C.gold+"10",borderRadius:8,border:"1px solid "+C.goldL}}><div style={{fontSize:9,color:C.gold,fontWeight:"bold"}}>⚡ IMPACT: +{Math.round(pred.ipBonus)} runs added to projection (~6% PP boost)</div></div>}
+
+                {/* Matchup used indicator */}
+                {pred?.matchupUsed&&<div style={{marginBottom:8,padding:"6px 10px",background:C.greenL+"08",borderRadius:6,border:"1px solid "+C.greenL+"30"}}><div style={{fontSize:8,color:C.greenL}}>✓ Real batter-vs-bowler matchup data used in prediction</div></div>}
 
                 {!liveData?.isLive&&<button onClick={fetchTossAndLineup} disabled={fetchingToss} style={{width:"100%",padding:11,borderRadius:8,fontSize:10,cursor:fetchingToss?"not-allowed":"pointer",background:"#eff6ff",border:"1.5px solid #3b82f6",color:"#1e40af",fontFamily:"inherit",fontWeight:"bold",marginBottom:8}}>
                   {fetchingToss?"⏳ FETCHING TOSS & PLAYING 11...":"🏏 GET TOSS & PLAYING 11"}
@@ -1148,7 +1122,6 @@ export default function Shakti(){
 
                 {pred&&(
                   <div>
-                    {/* Remaining batting depth */}
                     {remainingBat.yetToBat.length>0&&(
                       <div style={{...card({marginBottom:10,padding:10})}}>
                         <div style={{fontSize:8,color:C.dim,letterSpacing:2,marginBottom:6,fontWeight:"bold"}}>BATTING DEPTH REMAINING</div>
@@ -1166,7 +1139,7 @@ export default function Shakti(){
                         </div>
                       </div>
                     )}
-                    {/* Win prob bar */}
+
                     <div style={{...card({marginBottom:10,padding:12})}}>
                       <div style={{fontSize:9,color:C.dim,letterSpacing:3,marginBottom:8,fontWeight:"bold"}}>WIN PROBABILITY</div>
                       <div style={{display:"flex",gap:4,marginBottom:6}}>
@@ -1188,7 +1161,6 @@ export default function Shakti(){
                       );
                     })}
 
-                    {/* Match winner */}
                     <div style={{...card({padding:12})}}>
                       <div style={{fontSize:9,color:C.dim,letterSpacing:3,marginBottom:8,fontWeight:"bold"}}>MATCH WINNER</div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
@@ -1274,21 +1246,29 @@ export default function Shakti(){
             {sub==="phase"&&!pred&&<div style={{...card({padding:20,textAlign:"center",color:C.dim})}}>Open a match and set conditions to see phase probabilities</div>}
 
             {/* BOWLERS */}
-            {sub==="bowlers"&&(
+            {sub==="bowlers"&&(()=>{
+              // Real data from shakti_data.json via shakti_db.js
+              const ppBowlers = getTeamPPBowlers(blTeam||match.t2);
+              const rawToss = getVenueTossData(match.venue);
+              const ti = rawToss
+                ? { bat: rawToss.batFirstWin, field: rawToss.fieldFirstWin, note: `${rawToss.matches} matches (Cricsheet 2008-2025)` }
+                : { bat: 50, field: 50, note: "No historical toss data for this venue" };
+              return(
               <div>
                 <div style={{...card({marginBottom:10,padding:14})}}>
                   <div style={{fontSize:9,color:C.crimson,letterSpacing:3,marginBottom:12,fontWeight:"bold"}}>PP BOWLING ATTACK — {blTeam||match.t2}</div>
-                  {(PP_BOWLERS[blTeam||match.t2]||[]).map((b,i)=>(
-                    <div key={b.n} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid "+C.border}}>
-                      <div><div style={{fontSize:11,color:C.text,fontWeight:"bold"}}>{i+1}. {b.n}</div><div style={{fontSize:8,color:C.dim,marginTop:2}}>Typically bowls overs {["1,4","2,3","5 or 6"][i]||"varies"}</div></div>
+                  {ppBowlers.map((b,i)=>(
+                    <div key={b.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid "+C.border}}>
+                      <div><div style={{fontSize:11,color:C.text,fontWeight:"bold"}}>{i+1}. {b.name}</div><div style={{fontSize:8,color:C.dim,marginTop:2}}>Typically bowls overs {["1,4","2,3","5 or 6"][i]||"varies"}</div></div>
                       <div style={{textAlign:"right"}}>
-                        <div style={{fontSize:16,fontWeight:"bold",color:b.e<=7?C.greenL:b.e<=8.5?C.gold:C.red}}>{b.e}</div>
+                        <div style={{fontSize:16,fontWeight:"bold",color:b.ppEcon<=7?C.greenL:b.ppEcon<=8.5?C.gold:C.red}}>{b.ppEcon.toFixed(1)}</div>
                         <div style={{fontSize:8,color:C.dim}}>PP econ</div>
-                        <div style={{fontSize:8,color:b.e<=7?"#dc2626":C.dim,fontWeight:"bold"}}>{b.e<=7?"DANGER":b.e<=8?"GOOD":"BEATABLE"}</div>
+                        <div style={{fontSize:8,color:b.ppEcon<=7?"#dc2626":C.dim,fontWeight:"bold"}}>{b.ppEcon<=7?"DANGER":b.ppEcon<=8?"GOOD":"BEATABLE"}</div>
                       </div>
                     </div>
                   ))}
-                  {(PP_BOWLERS[blTeam||match.t2]||[]).length>0&&(
+                  {ppBowlers.length===0&&<div style={{fontSize:10,color:C.dim,padding:"10px 0"}}>No PP bowler data for {blTeam||match.t2}</div>}
+                  {ppBowlers.length>0&&(
                     <div style={{marginTop:10,padding:10,background:C.bg,borderRadius:8}}>
                       <div style={{fontSize:8,color:C.dim,marginBottom:2}}>TEAM PP ECON AVG</div>
                       <div style={{fontSize:18,fontWeight:"bold",color:C.crimson}}>{getTeamPPEconFull(blTeam||match.t2).toFixed(2)}</div>
@@ -1298,19 +1278,18 @@ export default function Shakti(){
                 </div>
                 <div style={{...card({padding:14})}}>
                   <div style={{fontSize:9,color:C.gold,letterSpacing:3,marginBottom:12,fontWeight:"bold"}}>TOSS INTELLIGENCE — {match.venue.split(",")[0]}</div>
-                  {(()=>{const ti=TOSS_INTEL[match.venue]||{bat:50,field:50,note:"No data"};return(
-                    <div>
-                      <div style={{display:"flex",gap:8,marginBottom:10}}>
-                        <div style={{flex:1,padding:12,borderRadius:10,background:ti.bat>ti.field?C.greenL+"10":C.bg,border:"1px solid "+(ti.bat>ti.field?C.greenL:C.border),textAlign:"center"}}><div style={{fontSize:9,fontWeight:"bold",color:C.text,marginBottom:4}}>BAT FIRST</div><div style={{fontSize:22,fontWeight:"bold",color:ti.bat>ti.field?C.greenL:C.muted}}>{ti.bat}%</div><div style={{fontSize:8,color:C.dim}}>win rate</div></div>
-                        <div style={{flex:1,padding:12,borderRadius:10,background:ti.field>ti.bat?C.greenL+"10":C.bg,border:"1px solid "+(ti.field>ti.bat?C.greenL:C.border),textAlign:"center"}}><div style={{fontSize:9,fontWeight:"bold",color:C.text,marginBottom:4}}>FIELD FIRST</div><div style={{fontSize:22,fontWeight:"bold",color:ti.field>ti.bat?C.greenL:C.muted}}>{ti.field}%</div><div style={{fontSize:8,color:C.dim}}>win rate</div></div>
-                      </div>
-                      <div style={{padding:10,background:"#fffbeb",borderRadius:8,border:"1px solid "+C.goldL}}><div style={{fontSize:9,color:C.gold,fontWeight:"bold"}}>💡 {ti.note}</div></div>
-                      <div style={{marginTop:10,padding:10,background:C.bg,borderRadius:8}}><div style={{fontSize:8,color:C.dim,marginBottom:2}}>YOUR CURRENT TOSS</div><div style={{fontSize:11,fontWeight:"bold",color:C.crimson}}>{battingFirst||match.t1} bats first → {toss==="batting"?"batting":"chasing"}</div><div style={{fontSize:8,color:toss==="batting"?ti.bat>50?C.greenL:C.red:ti.field>50?C.greenL:C.red,marginTop:2}}>{toss==="batting"?ti.bat>50?"✓ Toss-favoured situation":"⚠ Toss working against you":ti.field>50?"✓ Toss-favoured situation":"⚠ Toss working against you"}</div></div>
+                  <div>
+                    <div style={{display:"flex",gap:8,marginBottom:10}}>
+                      <div style={{flex:1,padding:12,borderRadius:10,background:ti.bat>ti.field?C.greenL+"10":C.bg,border:"1px solid "+(ti.bat>ti.field?C.greenL:C.border),textAlign:"center"}}><div style={{fontSize:9,fontWeight:"bold",color:C.text,marginBottom:4}}>BAT FIRST</div><div style={{fontSize:22,fontWeight:"bold",color:ti.bat>ti.field?C.greenL:C.muted}}>{ti.bat}%</div><div style={{fontSize:8,color:C.dim}}>win rate</div></div>
+                      <div style={{flex:1,padding:12,borderRadius:10,background:ti.field>ti.bat?C.greenL+"10":C.bg,border:"1px solid "+(ti.field>ti.bat?C.greenL:C.border),textAlign:"center"}}><div style={{fontSize:9,fontWeight:"bold",color:C.text,marginBottom:4}}>FIELD FIRST</div><div style={{fontSize:22,fontWeight:"bold",color:ti.field>ti.bat?C.greenL:C.muted}}>{ti.field}%</div><div style={{fontSize:8,color:C.dim}}>win rate</div></div>
                     </div>
-                  );})()}
+                    <div style={{padding:10,background:"#fffbeb",borderRadius:8,border:"1px solid "+C.goldL}}><div style={{fontSize:9,color:C.gold,fontWeight:"bold"}}>💡 {ti.note}</div></div>
+                    <div style={{marginTop:10,padding:10,background:C.bg,borderRadius:8}}><div style={{fontSize:8,color:C.dim,marginBottom:2}}>YOUR CURRENT TOSS</div><div style={{fontSize:11,fontWeight:"bold",color:C.crimson}}>{battingFirst||match.t1} bats first → {toss==="batting"?"batting":"chasing"}</div><div style={{fontSize:8,color:toss==="batting"?ti.bat>50?C.greenL:C.red:ti.field>50?C.greenL:C.red,marginTop:2}}>{toss==="batting"?ti.bat>50?"✓ Toss-favoured situation":"⚠ Toss working against you":ti.field>50?"✓ Toss-favoured situation":"⚠ Toss working against you"}</div></div>
+                  </div>
                 </div>
               </div>
-            )}
+              );
+            })()}
 
             {/* LIVE */}
             {sub==="live"&&(
@@ -1371,8 +1350,15 @@ export default function Shakti(){
         {tab==="intel"&&match&&(()=>{
           let intel,h;
           try{intel=realIntelScore(match,toss,v2026);}catch(e){intel={score:50,verdict:"WATCH",col:C.gold,details:[]};}
-          try{h=getH2H(match.t1,match.t2);}catch(e){h={total:10,t1wins:5,last5:[1,0,1,0,1],venueEdge:{}};}
-          const ti=TOSS_INTEL[match.venue]||{bat:50,field:50,note:"No data"};
+          // Real H2H from shakti_data.json
+          try{h=getH2H(match.t1,match.t2,match.venue);}catch(e){h={matches:10,t1WinPct:50,last5:[1,0,1,0,1],avgPP:55};}
+          const t1Wins=Math.round(h.t1WinPct/100*h.matches);
+          const t2Wins=h.matches-t1Wins;
+          // Real toss data
+          const rawToss=getVenueTossData(match.venue);
+          const ti=rawToss
+            ? {bat:rawToss.batFirstWin,field:rawToss.fieldFirstWin,note:`${rawToss.matches} matches (Cricsheet 2008-2025)`}
+            : {bat:50,field:50,note:"No historical toss data"};
           return(
           <div>
             <div style={{...card({marginBottom:10,background:intel.verdict==="BET"?"#f0fdf4":intel.verdict==="WATCH"?"#fffbeb":"#fff1f0",border:"1.5px solid "+intel.col})}}>
@@ -1382,16 +1368,20 @@ export default function Shakti(){
                 <div key={l} style={{marginBottom:10}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:10,color:C.sub}}>{l}</span><span style={{fontSize:10,color:intel.col,fontWeight:"bold"}}>{dv}/{max}</span></div><div style={{height:4,background:C.border,borderRadius:2}}><div style={{height:"100%",width:(dv/max*100)+"%",background:intel.col,borderRadius:2,transition:"width 0.5s"}}/></div><div style={{fontSize:8,color:C.dim,marginTop:2}}>{note}</div></div>
               ))}
             </div>
-            {/* H2H */}
+            {/* Real H2H */}
             <div style={{...card({marginBottom:10,padding:14})}}>
-              <div style={{fontSize:9,color:C.dim,letterSpacing:3,marginBottom:12,fontWeight:"bold"}}>HEAD-TO-HEAD RECORD</div>
+              <div style={{fontSize:9,color:C.dim,letterSpacing:3,marginBottom:12,fontWeight:"bold"}}>HEAD-TO-HEAD — {match.venue.split(",")[0]}</div>
               <div style={{display:"flex",gap:8,marginBottom:10}}>
-                <div style={{flex:1,padding:12,borderRadius:10,background:C.crimson+"08",border:"1px solid "+C.crimson+"30",textAlign:"center"}}><div style={{fontSize:8,color:C.dim,marginBottom:4}}>{match.t1}</div><div style={{fontSize:28,fontWeight:"bold",color:C.crimson}}>{h.t1wins}</div><div style={{fontSize:8,color:C.dim}}>wins</div></div>
-                <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}><div style={{fontSize:8,color:C.dim}}>of</div><div style={{fontSize:14,fontWeight:"bold",color:C.text}}>{h.total}</div></div>
-                <div style={{flex:1,padding:12,borderRadius:10,background:C.gold+"08",border:"1px solid "+C.goldL+"30",textAlign:"center"}}><div style={{fontSize:8,color:C.dim,marginBottom:4}}>{match.t2}</div><div style={{fontSize:28,fontWeight:"bold",color:C.gold}}>{h.total-h.t1wins}</div><div style={{fontSize:8,color:C.dim}}>wins</div></div>
+                <div style={{flex:1,padding:12,borderRadius:10,background:C.crimson+"08",border:"1px solid "+C.crimson+"30",textAlign:"center"}}><div style={{fontSize:8,color:C.dim,marginBottom:4}}>{match.t1}</div><div style={{fontSize:28,fontWeight:"bold",color:C.crimson}}>{t1Wins}</div><div style={{fontSize:8,color:C.dim}}>wins</div></div>
+                <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}><div style={{fontSize:8,color:C.dim}}>of</div><div style={{fontSize:14,fontWeight:"bold",color:C.text}}>{h.matches}</div></div>
+                <div style={{flex:1,padding:12,borderRadius:10,background:C.gold+"08",border:"1px solid "+C.goldL+"30",textAlign:"center"}}><div style={{fontSize:8,color:C.dim,marginBottom:4}}>{match.t2}</div><div style={{fontSize:28,fontWeight:"bold",color:C.gold}}>{t2Wins}</div><div style={{fontSize:8,color:C.dim}}>wins</div></div>
               </div>
-              <div style={{marginBottom:10}}><div style={{fontSize:8,color:C.dim,marginBottom:6,fontWeight:"bold"}}>LAST 5 MATCHES</div><div style={{display:"flex",gap:6}}>{h.last5.map((r,i)=><div key={i} style={{flex:1,height:28,borderRadius:6,background:r===1?C.crimson+"20":C.gold+"20",border:"1px solid "+(r===1?C.crimson+"40":C.goldL+"40"),display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:11,fontWeight:"bold",color:r===1?C.crimson:C.gold}}>{r===1?match.t1.slice(0,2):match.t2.slice(0,2)}</span></div>)}</div></div>
-              {h.total>0&&<div style={{padding:8,background:C.bg,borderRadius:8,border:"1px solid "+C.border}}><div style={{fontSize:9,color:C.crimson,fontWeight:"bold"}}>{match.t1} wins {Math.round(h.t1wins/h.total*100)}% of all-time H2H</div><div style={{fontSize:8,color:C.muted,marginTop:2}}>Recent form (last 5): {h.last5.filter(r=>r===1).length}-{h.last5.filter(r=>r===0).length} to {match.t1}</div></div>}
+              {(h.last5||[]).length>0&&<div style={{marginBottom:10}}><div style={{fontSize:8,color:C.dim,marginBottom:6,fontWeight:"bold"}}>LAST 5 MATCHES</div><div style={{display:"flex",gap:6}}>{(h.last5||[]).map((r,i)=><div key={i} style={{flex:1,height:28,borderRadius:6,background:r===1?C.crimson+"20":C.gold+"20",border:"1px solid "+(r===1?C.crimson+"40":C.goldL+"40"),display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:11,fontWeight:"bold",color:r===1?C.crimson:C.gold}}>{r===1?match.t1.slice(0,2):match.t2.slice(0,2)}</span></div>)}</div></div>}
+              <div style={{padding:8,background:C.bg,borderRadius:8,border:"1px solid "+C.border}}>
+                <div style={{fontSize:9,color:C.crimson,fontWeight:"bold"}}>{match.t1} wins {Math.round(h.t1WinPct)}% of H2H at this venue</div>
+                <div style={{fontSize:8,color:C.muted,marginTop:2}}>{h.matches} matches played · avg PP {h.avgPP||"—"}</div>
+                <div style={{fontSize:8,color:C.dim,marginTop:2}}>Source: Cricsheet 2008-2025</div>
+              </div>
             </div>
             {/* PP matchup */}
             <div style={{...card({padding:14})}}>
@@ -1401,6 +1391,15 @@ export default function Shakti(){
                 <div style={{background:C.bg,borderRadius:8,padding:10}}><div style={{fontSize:8,color:C.dim,marginBottom:2}}>{blTeam||match.t2} PP Econ</div><div style={{fontSize:22,fontWeight:"bold",color:getTeamPPEconFull(blTeam||match.t2)<=7.5?C.red:getTeamPPEconFull(blTeam||match.t2)<=8.5?C.gold:C.greenL}}>{getTeamPPEconFull(blTeam||match.t2).toFixed(1)}</div><div style={{fontSize:8,color:C.dim,marginTop:2}}>Top 3 PP bowlers avg</div></div>
               </div>
               {v2026[match.venue]&&<div style={{marginTop:10,padding:10,background:C.bg,borderRadius:8}}><div style={{fontSize:8,color:C.gold,fontWeight:"bold",marginBottom:4}}>2026 SEASON DATA</div><div style={{display:"flex",gap:16}}><div><div style={{fontSize:8,color:C.dim}}>PP AVG</div><div style={{fontSize:16,fontWeight:"bold",color:C.crimson}}>{v2026[match.venue].avgPP}</div></div><div><div style={{fontSize:8,color:C.dim}}>TOTAL AVG</div><div style={{fontSize:16,fontWeight:"bold",color:C.crimson}}>{v2026[match.venue].avgTotal}</div></div><div><div style={{fontSize:8,color:C.dim}}>MATCHES</div><div style={{fontSize:16,fontWeight:"bold",color:C.crimson}}>{v2026[match.venue].matches}</div></div></div></div>}
+              {/* Toss intel in Intel tab too */}
+              <div style={{marginTop:10,padding:10,background:"#fffbeb",borderRadius:8,border:"1px solid "+C.goldL}}>
+                <div style={{fontSize:8,color:C.gold,fontWeight:"bold",marginBottom:4}}>TOSS INTELLIGENCE</div>
+                <div style={{display:"flex",gap:16}}>
+                  <div><div style={{fontSize:8,color:C.dim}}>BAT FIRST WIN</div><div style={{fontSize:16,fontWeight:"bold",color:ti.bat>50?C.greenL:C.red}}>{ti.bat}%</div></div>
+                  <div><div style={{fontSize:8,color:C.dim}}>FIELD FIRST WIN</div><div style={{fontSize:16,fontWeight:"bold",color:ti.field>50?C.greenL:C.red}}>{ti.field}%</div></div>
+                </div>
+                <div style={{fontSize:8,color:C.muted,marginTop:4}}>{ti.note}</div>
+              </div>
             </div>
           </div>
           );
@@ -1419,7 +1418,6 @@ export default function Shakti(){
               {lastSync.success&&lastSync.updates?.playersUpdated?.length>0&&<div style={{marginBottom:4}}><div style={{fontSize:8,color:C.dim,marginBottom:2}}>PLAYERS UPDATED:</div>{lastSync.updates.playersUpdated.map(p=><div key={p.name} style={{fontSize:9,color:C.text}}>{p.trend} {p.name}: {p.runs}runs SR{p.sr} → form×{p.formMult}</div>)}</div>}
               {lastSync.success&&lastSync.updates?.bowlersUpdated?.length>0&&<div style={{marginBottom:4}}><div style={{fontSize:8,color:C.dim,marginBottom:2}}>BOWLERS UPDATED:</div>{lastSync.updates.bowlersUpdated.map(b=><div key={b.name} style={{fontSize:9,color:C.text}}>{b.trend} {b.name}: econ {b.econ} form×{b.formMult}</div>)}</div>}
               {lastSync.success&&lastSync.updates?.venueUpdated&&<div style={{fontSize:9,color:C.sub,marginTop:4}}>📍 {lastSync.updates.venueUpdated.venue?.split(",")[0]}: PP {lastSync.updates.venueUpdated.newAvgPP} Total {lastSync.updates.venueUpdated.newAvgTotal} ({lastSync.updates.venueUpdated.matches}M)</div>}
-              {lastSync.success&&lastSync.updates?.biasDetected?.map((b,i)=><div key={i} style={{fontSize:9,color:C.gold,fontWeight:"bold",marginTop:4}}>⚡ {b.msg}</div>)}
             </div>}
             <div style={{...card({marginBottom:12,padding:14})}}>
               <div style={{fontSize:9,color:C.dim,letterSpacing:3,marginBottom:10,fontWeight:"bold"}}>ENGINE ACCURACY — REAL DATA</div>
@@ -1431,6 +1429,8 @@ export default function Shakti(){
                 </div>
               </div>
               {accuracy.patterns?.map((p,i)=><div key={i} style={{fontSize:9,color:p.type==="good"?C.greenL:C.gold,fontWeight:"bold",marginTop:4}}>→ {p.msg}</div>)}
+              {/* Prediction log count */}
+              {predictionLog.length>0&&<div style={{marginTop:8,padding:8,background:C.bg,borderRadius:6,border:"1px solid "+C.border}}><div style={{fontSize:8,color:C.dim}}>{predictionLog.length} prediction snapshots saved — bias detection active</div></div>}
             </div>
             <div style={card()}>
               <div style={{fontSize:9,color:C.crimson,letterSpacing:3,marginBottom:12,fontWeight:"bold"}}>LOG MATCH RESULT</div>
