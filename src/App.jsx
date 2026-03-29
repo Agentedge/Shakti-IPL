@@ -184,7 +184,7 @@ function realIntelScore(match,toss,v2026){
 
 // ── Prediction Engine ──────────────────────────────────────────
 function calibratedVenue(vn,v2026){
-  const base=VENUES_BASE[vn]||VENUES_BASE["Narendra Modi, Ahmedabad"];
+  const base=VENUES_BASE[vn]||Object.values(VENUES_BASE)[0]||{pp:53,ov10:91,ov12:110,ov15:140,total:175,chase:50,pacePen:1.0,spinPen:1.0};
   const cal=v2026[vn];
   if(!cal||cal.matches===0)return base;
   const w=Math.min(0.7,cal.matches*0.14);
