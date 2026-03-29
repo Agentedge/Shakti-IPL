@@ -194,8 +194,10 @@ function calibratedVenue(vn,v2026){
 function predict(cfg){
   const{venueName,battingTeam,bowlingTeam,striker,nonStriker,bowler,pitchType,weather,toss,lS,lW,lO,v2026,is2nd,target,impactPlayerAdded,strikerData,nonStrikerData,bowlerData,biasLog,remainingBat,remainingBowl}=cfg;
   const v=calibratedVenue(venueName,v2026||{});
-  const p1=strikerData||PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"];
-  const p2=nonStrikerData||PLAYERS_BASE[nonStriker]||PLAYERS_BASE["Other Batsman"];
+  const FALLBACK_BATTER={ppSR:120,midSR:130,deathSR:150,conf:"LOW"};
+const FALLBACK_BOWLER={ppEcon:8.5,midEcon:8.8,deathEcon:10.0,type:"pace"};
+const p1=strikerData||PLAYERS_BASE[striker]||FALLBACK_BATTER;
+const p2=nonStrikerData||PLAYERS_BASE[nonStriker]||FALLBACK_BATTER;
   const teamPPSR=battingTeam?getTeamPPSR(battingTeam):(p1.ppSR+p2.ppSR)/2;
   const teamPPEcon=bowlingTeam?getTeamPPEconFull(bowlingTeam):(BOWLERS_BASE[bowler]?.ppEcon||8.5);
   // Real batter-vs-bowler matchup lookup (requires 20+ balls)
@@ -529,7 +531,7 @@ export default function Shakti(){
 
   let strikerData=PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"];
   let nonStrikerData=PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"];
-  let bowlerData=BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"];
+  let bowlerData=BOWLERS_BASE[bowler]||{ppEcon:8.5,midEcon:8.8,deathEcon:10.0,type:"pace"};
   try{strikerData=applyFormToPlayer(striker,PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"],playerForm,biasLog,match?.venue);}catch(e){}
   try{nonStrikerData=applyFormToPlayer(nonStrike,PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"],playerForm,biasLog,match?.venue);}catch(e){}
   try{bowlerData=applyFormToBowler(bowler,BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"],bowlerForm);}catch(e){}
