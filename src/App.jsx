@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
-import { VENUES_BASE, PLAYERS_BASE, BOWLERS_BASE, SQUADS, MATCHES, getH2H, getVenueTossData, getMatchupSR, getTeamPPBowlers } from "./shakti_db.js";
+import { VENUES_BASE, PLAYERS_BASE, BOWLERS_BASE, SQUADS, MATCHES, getH2H, getVenueTossData, getMatchupSR, getTeamPPBowlers, getVenueData, resolvePlayerName, resolveBowlerName, FALLBACK_BATTER, FALLBACK_BOWLER, FALLBACK_VENUE } from "./shakti_db.js";
 import { syncLastMatch, applyFormToPlayer, applyFormToBowler } from "./cricket_sync.js";
 import { findMatchId, fetchTossAndPlaying11, fetchLiveScorecard, getRemainingBattingStrength, getRemainingBowlingStrength, BATTING_ORDERS, BOWLING_ROTATION } from "./playing11_engine.js";
 
@@ -44,7 +44,7 @@ function tierCol(t){return t==="A"?C.crimson:t==="B"?C.gold:C.muted;}
 function getTeamPPSR(tc){
   const s=SQUADS[tc]||[];
   const op=s.slice(0,3);
-  const srs=op.map(p=>PLAYERS_BASE[p]?.ppSR||120);
+  const srs=op.map(p=>{const key=resolvePlayerName(p);return (key&&PLAYERS_BASE[key]?.ppSR)||120;});
   return srs[0]*0.40+(srs[1]||srs[0])*0.35+(srs[2]||srs[0])*0.25;
 }
 
@@ -95,7 +95,7 @@ function phaseProbDist(predicted,variance){
 
 // ── Win Probability ────────────────────────────────────────────
 function calcPreMatchWinProb(t1,t2,venue,toss){
-  const v=VENUES_BASE[venue]||{};
+  const v=getVenueData(venue)||{};
   const battingFirst=toss==="batting"?t1:t2;
   const vChase=(v.chase||50)/100;
   const t1PPSR=getTeamPPSR(t1),t2PPSR=getTeamPPSR(t2);
@@ -113,20 +113,20 @@ function calcPreMatchWinProb(t1,t2,venue,toss){
   // Recent form proxy from H2H last5
   const recentT1=(h.last5||[1,0,1,0,1]).reduce((s,v)=>s+v,0)/5;
   prob+=(recentT1-0.5)*0.06;
-  // Hot players
-  const t1Hot=(SQUADS[t1]||[]).filter(p=>{const pl=PLAYERS_BASE[p];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.12;}).length;
-  const t2Hot=(SQUADS[t2]||[]).filter(p=>{const pl=PLAYERS_BASE[p];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.12;}).length;
+  // Hot players — resolve names before lookup
+  const t1Hot=(SQUADS[t1]||[]).filter(p=>{const key=resolvePlayerName(p);const pl=key&&PLAYERS_BASE[key];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.12;}).length;
+  const t2Hot=(SQUADS[t2]||[]).filter(p=>{const key=resolvePlayerName(p);const pl=key&&PLAYERS_BASE[key];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.12;}).length;
   prob+=(t1Hot-t2Hot)*0.022;
   return Math.round(Math.max(0.28,Math.min(0.72,prob))*100);
 }
 
 function calcLiveWinProb(score,wickets,overs,target,venue,battingTeam,chasingTeam,is2nd){
-  const v=VENUES_BASE[venue]||{};
+  const v=getVenueData(venue)||{};
   if(is2nd&&target>0){
     const needed=target-score;
     const ballsLeft=Math.max(1,(20-overs)*6);
     const reqRR=(needed/ballsLeft)*6;
-    const avgSR=overs<6?getTeamPPSR(chasingTeam):(SQUADS[chasingTeam]||[]).slice(0,5).map(p=>PLAYERS_BASE[p]?.midSR||130).reduce((a,b)=>a+b,0)/5;
+    const avgSR=overs<6?getTeamPPSR(chasingTeam):(SQUADS[chasingTeam]||[]).slice(0,5).map(p=>{const key=resolvePlayerName(p);return (key&&PLAYERS_BASE[key]?.midSR)||130;}).reduce((a,b)=>a+b,0)/5;
     const projRR=avgSR/100*6;
     const rrRatio=Math.max(0.1,projRR/Math.max(0.1,reqRR));
     const wktF=Math.pow(0.90,wickets);
@@ -146,7 +146,6 @@ function calcLiveWinProb(score,wickets,overs,target,venue,battingTeam,chasingTea
 
 // ── Real Intel Score ───────────────────────────────────────────
 function realIntelScore(match,toss,v2026){
-  const v=VENUES_BASE[match.venue]||{};
   // Real toss data from shakti_data.json
   const rawToss = getVenueTossData(match.venue);
   const ti = rawToss
@@ -170,7 +169,7 @@ function realIntelScore(match,toss,v2026){
   const h=getH2H(match.t1,match.t2,match.venue);
   const h2hScore=Math.max(2,Math.min(14,Math.round(7+(h.t1WinPct/100-0.5)*14)));score+=h2hScore;
   details.push({l:"H2H Record",v:h2hScore,max:14,note:`${match.t1} ${Math.round(h.t1WinPct/100*h.matches)}-${h.matches-Math.round(h.t1WinPct/100*h.matches)} ${match.t2} (${h.matches} matches at venue)`});
-  const hotPlayers=(SQUADS[battingTeam]||[]).filter(p=>{const pl=PLAYERS_BASE[p];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.10;});
+  const hotPlayers=(SQUADS[battingTeam]||[]).filter(p=>{const key=resolvePlayerName(p);const pl=key&&PLAYERS_BASE[key];return pl?.wc2026_sr&&pl.wc2026_sr>pl.ppSR*1.10;});
   const hf=Math.min(12,hotPlayers.length*4);score+=hf;
   details.push({l:"In-Form Players",v:hf,max:12,note:hotPlayers.length>0?`${hotPlayers.slice(0,2).join(", ")} in WC form`:"No notable hot streaks"});
   const isDew=match.time.includes("7:30")&&["Wankhede, Mumbai","RGISC, Hyderabad","SMS Stadium, Jaipur","Ekana, Lucknow","Eden Gardens, Kolkata"].includes(match.venue);
@@ -184,7 +183,7 @@ function realIntelScore(match,toss,v2026){
 
 // ── Prediction Engine ──────────────────────────────────────────
 function calibratedVenue(vn,v2026){
-  const base=VENUES_BASE[vn]||Object.values(VENUES_BASE)[0]||{pp:53,ov10:91,ov12:110,ov15:140,total:175,chase:50,pacePen:1.0,spinPen:1.0};
+  const base=getVenueData(vn)||FALLBACK_VENUE;
   const cal=v2026[vn];
   if(!cal||cal.matches===0)return base;
   const w=Math.min(0.7,cal.matches*0.14);
@@ -194,18 +193,21 @@ function calibratedVenue(vn,v2026){
 function predict(cfg){
   const{venueName,battingTeam,bowlingTeam,striker,nonStriker,bowler,pitchType,weather,toss,lS,lW,lO,v2026,is2nd,target,impactPlayerAdded,strikerData,nonStrikerData,bowlerData,biasLog,remainingBat,remainingBowl}=cfg;
   const v=calibratedVenue(venueName,v2026||{});
-  const FALLBACK_BATTER={ppSR:120,midSR:130,deathSR:150,conf:"LOW"};
-const FALLBACK_BOWLER={ppEcon:8.5,midEcon:8.8,deathEcon:10.0,type:"pace"};
-const p1=strikerData||PLAYERS_BASE[striker]||FALLBACK_BATTER;
-const p2=nonStrikerData||PLAYERS_BASE[nonStriker]||FALLBACK_BATTER;
+  // Resolve full squad names → Cricsheet abbreviated keys before any PLAYERS_BASE/BOWLERS_BASE lookup
+  const strikerKey=resolvePlayerName(striker);
+  const nonStrikerKey=resolvePlayerName(nonStriker);
+  const bowlerKey=resolveBowlerName(bowler);
+  const p1=strikerData||(strikerKey&&PLAYERS_BASE[strikerKey])||FALLBACK_BATTER;
+  const p2=nonStrikerData||(nonStrikerKey&&PLAYERS_BASE[nonStrikerKey])||FALLBACK_BATTER;
+  const bowlerBaseData=(bowlerKey&&BOWLERS_BASE[bowlerKey])||FALLBACK_BOWLER;
   const teamPPSR=battingTeam?getTeamPPSR(battingTeam):(p1.ppSR+p2.ppSR)/2;
-  const teamPPEcon=bowlingTeam?getTeamPPEconFull(bowlingTeam):(BOWLERS_BASE[bowler]?.ppEcon||8.5);
-  // Real batter-vs-bowler matchup lookup (requires 20+ balls)
+  const teamPPEcon=bowlingTeam?getTeamPPEconFull(bowlingTeam):(bowlerBaseData.ppEcon||8.5);
+  // Real batter-vs-bowler matchup lookup (requires 20+ balls, resolves names internally)
   const matchupSR = getMatchupSR(striker, bowler);
   const blendedPPSR = matchupSR
-    ? matchupSR*0.40 + p1.ppSR*0.35 + p2.ppSR*0.25   // 40% matchup, 60% base
-    : p1.ppSR*0.35 + p2.ppSR*0.25 + teamPPSR*0.40;    // original formula (no matchup data)
-  const blendedEcon=(BOWLERS_BASE[bowler]?.ppEcon||teamPPEcon)*0.55+teamPPEcon*0.45;
+    ? matchupSR*0.40 + p1.ppSR*0.35 + p2.ppSR*0.25
+    : p1.ppSR*0.35 + p2.ppSR*0.25 + teamPPSR*0.40;
+  const blendedEcon=(bowlerBaseData.ppEcon||teamPPEcon)*0.55+teamPPEcon*0.45;
   // Impact player: structural ~6% PP boost (no fabricated run numbers)
   const ipBonus = impactPlayerAdded ? v.pp * 0.06 : 0;
   const avgPPAgg=blendedPPSR/150;
@@ -529,12 +531,10 @@ export default function Shakti(){
   const bTeam=battingFirst||(match?(toss==="batting"?match.t1:match.t2):"");
   const blTeam=bTeam&&match?(bTeam===match.t1?match.t2:match.t1):"";
 
-  let strikerData=PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"];
-  let nonStrikerData=PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"];
-  let bowlerData=BOWLERS_BASE[bowler]||{ppEcon:8.5,midEcon:8.8,deathEcon:10.0,type:"pace"};
-  try{strikerData=applyFormToPlayer(striker,PLAYERS_BASE[striker]||PLAYERS_BASE["Other Batsman"],playerForm,biasLog,match?.venue);}catch(e){}
-  try{nonStrikerData=applyFormToPlayer(nonStrike,PLAYERS_BASE[nonStrike]||PLAYERS_BASE["Other Batsman"],playerForm,biasLog,match?.venue);}catch(e){}
-  try{bowlerData=applyFormToBowler(bowler,BOWLERS_BASE[bowler]||BOWLERS_BASE["Average Bowler"],bowlerForm);}catch(e){}
+  let strikerData=null,nonStrikerData=null,bowlerData=null;
+  try{const sk=resolvePlayerName(striker);strikerData=applyFormToPlayer(striker,(sk&&PLAYERS_BASE[sk])||FALLBACK_BATTER,playerForm,biasLog,match?.venue);}catch(e){}
+  try{const nsk=resolvePlayerName(nonStrike);nonStrikerData=applyFormToPlayer(nonStrike,(nsk&&PLAYERS_BASE[nsk])||FALLBACK_BATTER,playerForm,biasLog,match?.venue);}catch(e){}
+  try{const bk=resolveBowlerName(bowler);bowlerData=applyFormToBowler(bowler,(bk&&BOWLERS_BASE[bk])||FALLBACK_BOWLER,bowlerForm);}catch(e){}
 
   let remainingBat={avgMidSR:130,avgDeathSR:155,yetToBat:[],hasFinisher:false};
   let remainingBowl={avgDeathEcon:9.5,remainingBowlers:[]};
@@ -577,9 +577,9 @@ export default function Shakti(){
         setLastUpd(now.getHours()+":"+String(now.getMinutes()).padStart(2,"0"));
         setFetchStatus("Updated at "+now.getHours()+":"+String(now.getMinutes()).padStart(2,"0"));
         if(d.isLive){
-          if(PLAYERS_BASE[d.striker])setStriker(d.striker);
-          if(PLAYERS_BASE[d.nonStriker])setNonStrike(d.nonStriker);
-          if(BOWLERS_BASE[d.bowler])setBowler(d.bowler);
+          if(resolvePlayerName(d.striker))setStriker(d.striker);
+          if(resolvePlayerName(d.nonStriker))setNonStrike(d.nonStriker);
+          if(resolveBowlerName(d.bowler))setBowler(d.bowler);
           if((d.wickets||0)>prevWkts)setShowWkt(true);
           setPrevWkts(d.wickets||0);
           if(d.target&&d.target>0){setIs2nd(true);setTarget(d.target);}
@@ -712,7 +712,8 @@ export default function Shakti(){
       result.innings.forEach(inn=>{
         (inn.batting||[]).forEach(b=>{
           if(!b.name||b.balls<4) return;
-          const player = PLAYERS_BASE[b.name];
+          const key=resolvePlayerName(b.name)||b.name;
+          const player = PLAYERS_BASE[key];
           if(!player) return;
           if(!newPlayerForm[b.name]) newPlayerForm[b.name]=[];
           newPlayerForm[b.name]=[...newPlayerForm[b.name],{runs:b.runs,balls:b.balls,sr:b.sr,date:result.date}].slice(-5);
@@ -728,7 +729,8 @@ export default function Shakti(){
         });
         (inn.bowling||[]).forEach(b=>{
           if(!b.name||b.overs<1) return;
-          const bowlerB = BOWLERS_BASE[b.name];
+          const key=resolveBowlerName(b.name)||b.name;
+          const bowlerB = BOWLERS_BASE[key];
           if(!bowlerB) return;
           if(!newBowlerForm[b.name]) newBowlerForm[b.name]=[];
           newBowlerForm[b.name]=[...newBowlerForm[b.name],{overs:b.overs,runs:b.runs,wickets:b.wickets,econ:b.econ,date:result.date}].slice(-5);
@@ -826,12 +828,16 @@ export default function Shakti(){
               <button onClick={()=>setShowWkt(false)} style={{background:"none",border:"none",color:C.muted,fontSize:22,cursor:"pointer"}}>✕</button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-              {(SQUADS[bTeam||match.t1]||[]).map(p=>(
-                <button key={p} onClick={()=>{setStriker(p);setShowWkt(false);}} style={{padding:"11px 10px",borderRadius:10,fontSize:10,background:PLAYERS_BASE[p]?.wc2026_sr?C.gold+"10":C.bg,border:"1px solid "+(PLAYERS_BASE[p]?.wc2026_sr?C.goldL:C.border),color:C.text,cursor:"pointer",fontFamily:"inherit",textAlign:"left",display:"flex",justifyContent:"space-between"}}>
+              {(SQUADS[bTeam||match.t1]||[]).map(p=>{
+                const key=resolvePlayerName(p);
+                const pl=key&&PLAYERS_BASE[key];
+                return(
+                <button key={p} onClick={()=>{setStriker(p);setShowWkt(false);}} style={{padding:"11px 10px",borderRadius:10,fontSize:10,background:pl?.wc2026_sr?C.gold+"10":C.bg,border:"1px solid "+(pl?.wc2026_sr?C.goldL:C.border),color:C.text,cursor:"pointer",fontFamily:"inherit",textAlign:"left",display:"flex",justifyContent:"space-between"}}>
                   <span>{p.split(" ").slice(-1)[0]}</span>
-                  {PLAYERS_BASE[p]?.wc2026_sr&&<span style={{fontSize:8,color:C.gold}}>🔥</span>}
+                  {pl?.wc2026_sr&&<span style={{fontSize:8,color:C.gold}}>🔥</span>}
                 </button>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
@@ -949,7 +955,7 @@ export default function Shakti(){
                 </div>
                 <div style={{fontSize:9,color:C.dim,marginBottom:8}}>📍 {match.venue} · {match.time}</div>
                 <div style={{display:"flex",gap:5}}>
-                  {[["PP",(calibratedVenue(match.venue,v2026)).pp],["10ov",(calibratedVenue(match.venue,v2026)).ov10||"—"],["15ov",(calibratedVenue(match.venue,v2026)).ov15||"—"],["TOT",(calibratedVenue(match.venue,v2026)).total],["CHS",((VENUES_BASE[match.venue]||{}).chase||50)+"%"]].map(([l,v])=>(
+                  {[["PP",(calibratedVenue(match.venue,v2026)).pp],["10ov",(calibratedVenue(match.venue,v2026)).ov10||"—"],["15ov",(calibratedVenue(match.venue,v2026)).ov15||"—"],["TOT",(calibratedVenue(match.venue,v2026)).total],["CHS",((getVenueData(match.venue)||{}).chase||50)+"%"]].map(([l,v])=>(
                     <div key={l} style={{flex:1,background:C.bg,borderRadius:6,padding:"5px 3px",textAlign:"center",border:"1px solid "+C.border}}><div style={{fontSize:7,color:C.dim,marginBottom:1}}>{l}</div><div style={{fontSize:11,color:C.crimson,fontWeight:"bold"}}>{v}</div></div>
                   ))}
                 </div>
@@ -1128,12 +1134,15 @@ export default function Shakti(){
                       <div style={{...card({marginBottom:10,padding:10})}}>
                         <div style={{fontSize:8,color:C.dim,letterSpacing:2,marginBottom:6,fontWeight:"bold"}}>BATTING DEPTH REMAINING</div>
                         <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:6}}>
-                          {remainingBat.yetToBat.slice(0,6).map(p=>(
+                          {remainingBat.yetToBat.slice(0,6).map(p=>{
+                            const key=resolvePlayerName(p);
+                            return(
                             <div key={p} style={{padding:"3px 8px",borderRadius:12,background:C.bg,border:"1px solid "+C.border,fontSize:8,color:C.text}}>
                               {p.split(" ").slice(-1)[0]}
-                              {(PLAYERS_BASE[p]?.deathSR||0)>180&&<span style={{color:C.gold}}> ★</span>}
+                              {(key&&(PLAYERS_BASE[key]?.deathSR||0)>180)&&<span style={{color:C.gold}}> ★</span>}
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                         <div style={{display:"flex",gap:12}}>
                           <div style={{fontSize:8,color:C.dim}}>Mid SR avg: <span style={{color:C.crimson,fontWeight:"bold"}}>{remainingBat.avgMidSR}</span></div>
